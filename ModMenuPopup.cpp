@@ -1,12 +1,20 @@
 #include "ModMenuPopup.hpp"
-#include "Settings.hpp"
 #include <Geode/binding/PlayLayer.hpp>
 
 using namespace geode::prelude;
 
 namespace {
-    enum ToggleId { TOGGLE_NOCLIP = 1, TOGGLE_OVERLAY = 2 };
-    constexpr char const* TAB_NAMES[3] = {"Player", "Level", "Visual"};
+    constexpr char const* TAB_NAMES[4] = {"Player", "Level", "Visual", "Theme"};
+    constexpr float W = 380.f;
+    constexpr float H = 260.f;
+    constexpr float COL1 = 34.f;   // x тогглера в 1-й колонке
+    constexpr float COL2 = 206.f;  // x тогглера во 2-й колонке
+    constexpr float ROW1 = 160.f;
+    constexpr float ROW_STEP = 34.f;
+
+    ccColor3B scaled(ccColor3B c, float k) {
+        return {static_cast<GLubyte>(c.r * k), static_cast<GLubyte>(c.g * k), static_cast<GLubyte>(c.b * k)};
+    }
 }
 
 ModMenuPopup* ModMenuPopup::create() {
@@ -20,89 +28,147 @@ ModMenuPopup* ModMenuPopup::create() {
 }
 
 bool ModMenuPopup::init() {
-    if (!Popup::init(340.f, 230.f)) return false;
+    if (!Popup::init(W, H)) return false;
     this->setTitle("Mod Menu");
 
-    // Делаем координаты предсказуемыми: (0,0) = левый нижний угол окна.
-    // Если кнопка закрытия съехала, это место нужно подправить под актуальный Popup.
+    // Делаем координаты предсказуемыми: (0,0) = левый нижний угол окна
     m_buttonMenu->setContentSize(m_size);
     m_buttonMenu->setAnchorPoint({0.f, 0.f});
     m_buttonMenu->setPosition({0.f, 0.f});
 
+    // ---- декор "жидкого стекла": 3 статичных слоя, без шейдеров и без обновлений каждый кадр ----
+    m_bgSprite->setZOrder(-3);
+
+    m_gloss = CCLayerGradient::create(ccc4(255, 255, 255, 70), ccc4(255, 255, 255, 0));
+    m_gloss->setContentSize({W - 14.f, H * 0.5f});
+    m_gloss->setPosition({7.f, H - 7.f - H * 0.5f});
+    m_mainLayer->addChild(m_gloss, -2);
+
+    m_edge = CCLayerColor::create(ccc4(255, 255, 255, 120), W - 24.f, 1.5f);
+    m_edge->setPosition({12.f, H - 8.f});
+    m_mainLayer->addChild(m_edge, -1);
+
+    m_accentLine = CCLayerColor::create(ccc4(255, 255, 255, 220), W - 40.f, 2.f);
+    m_accentLine->setPosition({20.f, 188.f});
+    m_mainLayer->addChild(m_accentLine, -1);
+
     // ---- вкладки ----
-    for (int i = 0; i < 3; i++) {
-        auto spr = ButtonSprite::create(TAB_NAMES[i], 80, true, "bigFont.fnt", "GJ_button_04.png", 26.f, 0.6f);
+    for (int i = 0; i < TAB_COUNT; i++) {
+        auto spr = ButtonSprite::create(TAB_NAMES[i], 72, true, "bigFont.fnt", "GJ_button_04.png", 26.f, 0.6f);
         auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(ModMenuPopup::onTab));
         btn->setTag(i);
-        btn->setPosition({70.f + i * 100.f, 182.f});
+        btn->setPosition({58.f + i * 88.f, 208.f});
         m_buttonMenu->addChild(btn);
         m_tabBtns[i] = btn;
     }
 
     auto& s = mm::state();
 
-    // ---- вкладка Player ----
-    addToggle(0, TOGGLE_NOCLIP, "Noclip", s.noclip, 140.f);
+    // ======== Player ========
+    addToggle(0, mm::F::Noclip, "Noclip", COL1, ROW1);
+    addToggle(0, mm::F::Safe, "Safe mode", COL2, ROW1);
 
     m_speedLabel = CCLabelBMFont::create("", "bigFont.fnt");
     m_speedLabel->setScale(0.5f);
     m_speedLabel->setAnchorPoint({0.f, 0.5f});
-    m_speedLabel->setPosition({30.f, 104.f});
+    m_speedLabel->setPosition({COL1, ROW1 - ROW_STEP});
     m_mainLayer->addChild(m_speedLabel);
     m_tabNodes[0].push_back(m_speedLabel);
 
     for (int i = 0; i < (int)mm::SPEEDS.size(); i++) {
-        auto spr = ButtonSprite::create(fmt::format("x{}", mm::SPEEDS[i]).c_str(), 40, true, "bigFont.fnt", "GJ_button_04.png", 28.f, 0.5f);
+        auto spr = ButtonSprite::create(fmt::format("x{}", mm::SPEEDS[i]).c_str(), 46, true, "bigFont.fnt", "GJ_button_04.png", 28.f, 0.5f);
         auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(ModMenuPopup::onSpeed));
         btn->setTag(i);
-        btn->setPosition({45.f + i * 50.f, 72.f});
+        btn->setPosition({55.f + i * 54.f, ROW1 - 2 * ROW_STEP - 4.f});
         m_buttonMenu->addChild(btn);
         m_tabNodes[0].push_back(btn);
     }
     this->refreshSpeedLabel();
+    addLabel(0, "Safe mode: no records saved while cheats are on", COL1, 34.f, 0.4f);
 
-    // ---- вкладка Level ----
+    // ======== Level ========
     {
         auto spr = ButtonSprite::create("Restart level", 140, true, "bigFont.fnt", "GJ_button_01.png", 30.f, 0.6f);
         auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(ModMenuPopup::onRestart));
-        btn->setPosition({m_size.width / 2, 130.f});
+        btn->setPosition({W / 2, ROW1});
         m_buttonMenu->addChild(btn);
         m_tabNodes[1].push_back(btn);
-
-        auto hint = CCLabelBMFont::create("Works only inside a level", "chatFont.fnt");
-        hint->setScale(0.7f);
-        hint->setOpacity(160);
-        hint->setPosition({m_size.width / 2, 100.f});
-        m_mainLayer->addChild(hint);
-        m_tabNodes[1].push_back(hint);
     }
+    addToggle(1, mm::F::Hitboxes, "Show hitboxes", COL1, ROW1 - ROW_STEP);
+    addToggle(1, mm::F::NoDeath, "No death effect", COL1, ROW1 - 2 * ROW_STEP);
+    addLabel(1, "Restart works only inside a level", COL1, 34.f, 0.4f);
 
-    // ---- вкладка Visual ----
-    addToggle(2, TOGGLE_OVERLAY, "Info overlay", s.overlay, 140.f);
+    // ======== Visual (косметика) ========
+    addToggle(2, mm::F::Overlay, "Info overlay", COL1, ROW1);
+    addToggle(2, mm::F::HidePlayer, "Hide player", COL1, ROW1 - ROW_STEP);
+    addToggle(2, mm::F::UnlockAll, "Unlock icons", COL1, ROW1 - 2 * ROW_STEP);
+    addToggle(2, mm::F::RainbowIcon, "Rainbow icon", COL2, ROW1);
+    addToggle(2, mm::F::RainbowBG, "Rainbow BG", COL2, ROW1 - ROW_STEP);
+
+    // ======== Theme ========
+    addLabel(3, "Accent color", COL1, ROW1 + 6.f, 0.45f);
+    for (int i = 0; i < 12; i++) {
+        auto sw = CCSprite::createWithSpriteFrameName("whiteSquare60_001.png");
+        sw->setColor(mm::accents()[i]);
+        sw->setScale(0.5f);
+        auto btn = CCMenuItemSpriteExtra::create(sw, this, menu_selector(ModMenuPopup::onAccent));
+        btn->setTag(i);
+        float x = 40.f + (i % 6) * 60.f;
+        float y = (i < 6) ? ROW1 - 22.f : ROW1 - 56.f;
+        btn->setPosition({x, y});
+        m_buttonMenu->addChild(btn);
+        m_tabNodes[3].push_back(btn);
+        m_swatches.push_back(sw);
+    }
+    addToggle(3, mm::F::Glass, "Liquid glass", COL1, ROW1 - 2 * ROW_STEP - 6.f);
+
+    char const* opNames[3] = {"Low", "Mid", "High"};
+    for (int i = 0; i < 3; i++) {
+        auto spr = ButtonSprite::create(opNames[i], 50, true, "bigFont.fnt", "GJ_button_04.png", 26.f, 0.5f);
+        auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(ModMenuPopup::onGlassOpacity));
+        btn->setTag(i);
+        btn->setPosition({226.f + i * 56.f, ROW1 - 2 * ROW_STEP - 6.f});
+        m_buttonMenu->addChild(btn);
+        m_tabNodes[3].push_back(btn);
+        m_opacityBtns.push_back(btn);
+    }
+    addLabel(3, "Glass opacity", 200.f, ROW1 - 2 * ROW_STEP + 14.f, 0.4f);
 
     this->switchTab(0);
+    this->applyTheme();
     return true;
 }
 
-void ModMenuPopup::addToggle(int tab, int id, char const* label, bool value, float y) {
+void ModMenuPopup::addToggle(int tab, mm::F flag, char const* label, float x, float y) {
     auto toggler = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(ModMenuPopup::onToggle), 0.7f);
-    toggler->setTag(id);
-    toggler->toggle(value);
-    toggler->setPosition({40.f, y});
+    toggler->setTag(static_cast<int>(flag));
+    toggler->toggle(mm::on(flag));
+    toggler->setPosition({x, y});
     m_buttonMenu->addChild(toggler);
 
     auto text = CCLabelBMFont::create(label, "bigFont.fnt");
-    text->setScale(0.55f);
+    text->setScale(0.45f);
     text->setAnchorPoint({0.f, 0.5f});
-    text->setPosition({66.f, y});
+    text->setPosition({x + 24.f, y});
     m_mainLayer->addChild(text);
 
     m_tabNodes[tab].push_back(toggler);
     m_tabNodes[tab].push_back(text);
 }
 
+void ModMenuPopup::addLabel(int tab, char const* text, float x, float y, float scale) {
+    auto lbl = CCLabelBMFont::create(text, "bigFont.fnt");
+    lbl->setScale(scale);
+    lbl->setOpacity(190);
+    lbl->setAnchorPoint({0.f, 0.5f});
+    lbl->setPosition({x, y});
+    m_mainLayer->addChild(lbl);
+    m_tabNodes[tab].push_back(lbl);
+}
+
 void ModMenuPopup::switchTab(int index) {
-    for (int t = 0; t < 3; t++) {
+    m_currentTab = index;
+    for (int t = 0; t < TAB_COUNT; t++) {
         bool on = (t == index);
         for (auto node : m_tabNodes[t]) {
             node->setVisible(on);
@@ -114,20 +180,52 @@ void ModMenuPopup::switchTab(int index) {
     }
 }
 
+// Тема применяется только при открытии и при смене настроек: никаких per-frame обновлений
+void ModMenuPopup::applyTheme() {
+    auto& s = mm::state();
+    auto acc = mm::accent();
+    bool glass = mm::on(mm::F::Glass);
+
+    if (glass) {
+        m_bgSprite->setColor(scaled(acc, 0.28f));
+        m_bgSprite->setOpacity(static_cast<GLubyte>(mm::GLASS_OPACITY[s.glassOpacity]));
+    } else {
+        m_bgSprite->setColor(scaled(acc, 0.35f));
+        m_bgSprite->setOpacity(255);
+    }
+    m_gloss->setVisible(glass);
+    m_edge->setVisible(glass);
+
+    m_accentLine->setColor(acc);
+    m_title->setColor(acc);
+
+    for (int i = 0; i < (int)m_swatches.size(); i++) {
+        m_swatches[i]->setScale(i == s.accent ? 0.68f : 0.5f);
+    }
+    for (int i = 0; i < (int)m_opacityBtns.size(); i++) {
+        if (auto spr = typeinfo_cast<ButtonSprite*>(m_opacityBtns[i]->getNormalImage())) {
+            spr->updateBGImage(i == s.glassOpacity ? "GJ_button_01.png" : "GJ_button_04.png");
+        }
+        m_opacityBtns[i]->setEnabled(glass && m_currentTab == 3);
+    }
+}
+
 void ModMenuPopup::onTab(CCObject* sender) {
     this->switchTab(static_cast<CCNode*>(sender)->getTag());
+    this->applyTheme();
 }
 
 void ModMenuPopup::onToggle(CCObject* sender) {
     auto t = static_cast<CCMenuItemToggler*>(sender);
+    auto flag = static_cast<mm::F>(t->getTag());
     // в колбэке isToggled() ещё хранит СТАРОЕ состояние
-    bool now = !t->isToggled();
-    switch (t->getTag()) {
-        case TOGGLE_NOCLIP: mm::state().noclip = now; break;
-        case TOGGLE_OVERLAY:
-            mm::state().overlay = now;
-            mm::saveOverlay();
-            break;
+    mm::set(flag, !t->isToggled());
+    mm::save(flag);
+
+    switch (flag) {
+        case mm::F::Hitboxes: mm::applyHitboxes(); break;
+        case mm::F::Glass: this->applyTheme(); break;
+        default: break;
     }
 }
 
@@ -137,8 +235,20 @@ void ModMenuPopup::onSpeed(CCObject* sender) {
     this->refreshSpeedLabel();
 }
 
+void ModMenuPopup::onAccent(CCObject* sender) {
+    mm::state().accent = static_cast<CCNode*>(sender)->getTag();
+    mm::saveTheme();
+    this->applyTheme();
+}
+
+void ModMenuPopup::onGlassOpacity(CCObject* sender) {
+    mm::state().glassOpacity = static_cast<CCNode*>(sender)->getTag();
+    mm::saveTheme();
+    this->applyTheme();
+}
+
 void ModMenuPopup::refreshSpeedLabel() {
-    m_speedLabel->setString(fmt::format("Speed: x{}", mm::state().speed()).c_str());
+    m_speedLabel->setString(fmt::format("Speed: x{}", mm::speed()).c_str());
 }
 
 void ModMenuPopup::onRestart(CCObject*) {
