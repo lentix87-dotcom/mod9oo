@@ -86,27 +86,25 @@ class $modify(MMStartPosPlayLayer, PlayLayer) {
 
     void setupHasCompleted() {
         PlayLayer::setupHasCompleted();
-        auto& f = *m_fields;
+        auto& f = m_fields;
 
-        CCObject* o = nullptr;
-        CCARRAY_FOREACH(m_objects, o) {
-            auto obj = static_cast<GameObject*>(o);
+        for (auto obj : CCArrayExt<GameObject*>(m_objects)) {
             int id = obj->m_objectID;
             if (id == 31) {
-                f.startPos.push_back(static_cast<StartPosObject*>(obj));
+                f->startPos.push_back(static_cast<StartPosObject*>(obj));
             } else if (isSmartPortal(id)) {
-                f.portals.push_back({obj->getPositionX(), id});
+                f->portals.push_back({obj->getPositionX(), id});
             }
         }
-        std::stable_sort(f.portals.begin(), f.portals.end(),
+        std::stable_sort(f->portals.begin(), f->portals.end(),
                          [](Portal const& a, Portal const& b) { return a.x < b.x; });
-        std::stable_sort(f.startPos.begin(), f.startPos.end(),
+        std::stable_sort(f->startPos.begin(), f->startPos.end(),
                          [](StartPosObject* a, StartPosObject* b) { return a->getPositionX() < b->getPositionX(); });
 
-        if (f.startPos.empty()) return;
+        if (f->startPos.empty()) return;
 
         if (mm::on(mm::F::SmartStart)) {
-            for (auto sp : f.startPos) applySmart(sp, f.portals);
+            for (auto sp : f->startPos) applySmart(sp, f->portals);
         }
         this->buildSwitcherUi();
         this->schedule(schedule_selector(MMStartPosPlayLayer::tickStartPos), 0.2f);
@@ -114,19 +112,19 @@ class $modify(MMStartPosPlayLayer, PlayLayer) {
 
     void buildSwitcherUi() {
         if (!m_uiLayer) return;
-        auto& f = *m_fields;
+        auto& f = m_fields;
         auto ws = CCDirector::get()->getWinSize();
 
-        f.menu = CCMenu::create();
-        f.menu->setPosition({0.f, 0.f});
-        f.menu->setVisible(false);
+        f->menu = CCMenu::create();
+        f->menu->setPosition({0.f, 0.f});
+        f->menu->setVisible(false);
 
         auto leftSpr = CCSprite::createWithSpriteFrameName("GJ_arrow_03_001.png");
         leftSpr->setScale(0.55f);
         leftSpr->setOpacity(170);
         auto left = CCMenuItemSpriteExtra::create(leftSpr, this, menu_selector(MMStartPosPlayLayer::onPrevStartPos));
         left->setPosition({ws.width / 2.f - 80.f, 36.f});
-        f.menu->addChild(left);
+        f->menu->addChild(left);
 
         auto rightSpr = CCSprite::createWithSpriteFrameName("GJ_arrow_03_001.png");
         rightSpr->setScale(0.55f);
@@ -134,41 +132,41 @@ class $modify(MMStartPosPlayLayer, PlayLayer) {
         rightSpr->setFlipX(true);
         auto right = CCMenuItemSpriteExtra::create(rightSpr, this, menu_selector(MMStartPosPlayLayer::onNextStartPos));
         right->setPosition({ws.width / 2.f + 80.f, 36.f});
-        f.menu->addChild(right);
+        f->menu->addChild(right);
 
-        f.label = CCLabelBMFont::create("", "bigFont.fnt");
-        f.label->setScale(0.32f);
-        f.label->setOpacity(190);
-        f.label->setPosition({ws.width / 2.f, 36.f});
-        f.menu->addChild(f.label);
+        f->label = CCLabelBMFont::create("", "bigFont.fnt");
+        f->label->setScale(0.32f);
+        f->label->setOpacity(190);
+        f->label->setPosition({ws.width / 2.f, 36.f});
+        f->menu->addChild(f->label);
 
-        m_uiLayer->addChild(f.menu, 100);
+        m_uiLayer->addChild(f->menu, 100);
     }
 
     void tickStartPos(float) {
-        auto& f = *m_fields;
-        bool show = mm::on(mm::F::StartPos) && !f.startPos.empty();
-        if (f.menu) f.menu->setVisible(show);
-        if (show && f.label) {
-            int n = static_cast<int>(f.startPos.size());
-            std::string text = f.index < 0 ? fmt::format("StartPos: off ({})", n)
-                                           : fmt::format("StartPos {}/{}", f.index + 1, n);
-            f.label->setString(text.c_str());
+        auto& f = m_fields;
+        bool show = mm::on(mm::F::StartPos) && !f->startPos.empty();
+        if (f->menu) f->menu->setVisible(show);
+        if (show && f->label) {
+            int n = static_cast<int>(f->startPos.size());
+            std::string text = f->index < 0 ? fmt::format("StartPos: off ({})", n)
+                                           : fmt::format("StartPos {}/{}", f->index + 1, n);
+            f->label->setString(text.c_str());
         }
     }
 
     void switchStartPos(int idx) {
-        auto& f = *m_fields;
-        int n = static_cast<int>(f.startPos.size());
+        auto& f = m_fields;
+        int n = static_cast<int>(f->startPos.size());
         if (n == 0) return;
 
         // позиции: -1 (обычный старт), 0 .. n-1
         int total = n + 1;
         idx = ((idx + 1) % total + total) % total - 1;
-        f.index = idx;
+        f->index = idx;
 
-        StartPosObject* sp = idx < 0 ? nullptr : f.startPos[idx];
-        if (sp && mm::on(mm::F::SmartStart)) applySmart(sp, f.portals);
+        StartPosObject* sp = idx < 0 ? nullptr : f->startPos[idx];
+        if (sp && mm::on(mm::F::SmartStart)) applySmart(sp, f->portals);
 
         this->setStartPosObject(sp);
         if (m_isPracticeMode) this->removeAllCheckpoints();
