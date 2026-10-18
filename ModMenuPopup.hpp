@@ -48,7 +48,7 @@ protected:
     void buildTheme();
     void buildPicker();
     CCPoint cellOrigin(int col, int row) const;
-    void addCellLabel(int tab, char const* text, float x, float y, bool muted = false);
+    void addCellLabel(int tab, char const* text, float x, float y, bool muted = false, float maxW = 0.f);
     void addSwitchCell(int tab, mm::F flag, char const* label, int col, int row);
     CCMenuItemSpriteExtra* makePill(char const* text, float w, float h, int tag,
                                     SEL_MenuHandler sel, std::function<bool()> selected);
@@ -72,6 +72,8 @@ protected:
     void onTab(CCObject* sender);
     void onToggle(CCObject* sender);
     void onSpeed(CCObject* sender);
+    void onFps(CCObject* sender);
+    void onCorner(CCObject* sender);
     void onGlassOpacity(CCObject* sender);
     void onRestart(CCObject* sender);
     void onClosePressed(CCObject* sender);

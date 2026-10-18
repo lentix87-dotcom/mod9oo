@@ -27,6 +27,9 @@ const ccColor3B WARN_C = {255, 170, 60};
 const ccColor3B GOOD_C = {96, 222, 144};
 const ccColor3B WHITE_C = {255, 255, 255};
 
+// Радиус скругления с учётом настройки "Corners"
+float R(float maxRadius) { return maxRadius * mm::roundK(); }
+
 // CCDrawNode использует premultiplied alpha
 ccColor4F P(ccColor3B c, float a) {
     return {c.r / 255.f * a, c.g / 255.f * a, c.b / 255.f * a, a};
@@ -43,30 +46,65 @@ ccColor3B onColor(ccColor3B c) {
     return l > 150.f ? ccColor3B{20, 22, 28} : WHITE_C;
 }
 
-// Скруглённый прямоугольник одним полигоном (дёшево и со сглаживанием)
+bool nearPt(CCPoint a, CCPoint b) {
+    return std::abs(a.x - b.x) < 0.02f && std::abs(a.y - b.y) < 0.02f;
+}
+
+// Скруглённый прямоугольник одним полигоном.
+// ВАЖНО: дублирующиеся вершины (когда радиус = половине высоты) ломают
+// отрисовку CCDrawNode, поэтому они убираются.
 void drawRound(CCDrawNode* n, CCPoint o, CCSize s, float r, ccColor4F fill,
                float bw = 0.f, ccColor4F bc = ccColor4F{0.f, 0.f, 0.f, 0.f}) {
-    r = std::min(r, std::min(s.width, s.height) / 2.f);
-    constexpr int SEG = 6;
+    if (s.width < 1.f || s.height < 1.f) return;
+    r = std::clamp(r, 0.f, std::min(s.width, s.height) / 2.f);
+
     std::vector<CCPoint> pts;
-    pts.reserve((SEG + 1) * 4);
-    auto arc = [&](float cx, float cy, float a0) {
-        for (int i = 0; i <= SEG; i++) {
-            float a = a0 + (PI / 2.f) * i / SEG;
-            pts.push_back(ccp(cx + r * std::cos(a), cy + r * std::sin(a)));
-        }
+    pts.reserve(32);
+    auto push = [&](float x, float y) {
+        CCPoint p = ccp(x, y);
+        if (!pts.empty() && nearPt(pts.back(), p)) return;
+        pts.push_back(p);
     };
-    arc(o.x + s.width - r, o.y + s.height - r, 0.f);
-    arc(o.x + r, o.y + s.height - r, PI / 2.f);
-    arc(o.x + r, o.y + r, PI);
-    arc(o.x + s.width - r, o.y + r, 3.f * PI / 2.f);
+
+    if (r < 0.75f) {
+        push(o.x + s.width, o.y + s.height);
+        push(o.x, o.y + s.height);
+        push(o.x, o.y);
+        push(o.x + s.width, o.y);
+    } else {
+        constexpr int SEG = 6;
+        auto arc = [&](float cx, float cy, float a0) {
+            for (int i = 0; i <= SEG; i++) {
+                float a = a0 + (PI / 2.f) * i / SEG;
+                push(cx + r * std::cos(a), cy + r * std::sin(a));
+            }
+        };
+        arc(o.x + s.width - r, o.y + s.height - r, 0.f);
+        arc(o.x + r, o.y + s.height - r, PI / 2.f);
+        arc(o.x + r, o.y + r, PI);
+        arc(o.x + s.width - r, o.y + r, 3.f * PI / 2.f);
+    }
+    while (pts.size() > 3 && nearPt(pts.front(), pts.back())) pts.pop_back();
+    if (pts.size() < 3) return;
     n->drawPolygon(pts.data(), static_cast<unsigned int>(pts.size()), fill, bw, bc);
+}
+
+// Круг многоугольником (CCDrawNode::drawDot в этой версии рисует квадраты)
+void drawCircle(CCDrawNode* n, CCPoint c, float r, ccColor4F col) {
+    constexpr int N = 20;
+    CCPoint pts[N];
+    for (int i = 0; i < N; i++) {
+        float a = 2.f * PI * i / N;
+        pts[i] = ccp(c.x + r * std::cos(a), c.y + r * std::sin(a));
+    }
+    n->drawPolygon(pts, N, col, 0.f, ccColor4F{0.f, 0.f, 0.f, 0.f});
 }
 
 void drawSwitch(CCDrawNode* d, bool on) {
     d->clear();
-    drawRound(d, ccp(9.f, 7.f), CCSize(38.f, 20.f), 10.f, P(on ? mm::accent() : OFF_C, 1.f));
-    d->drawDot(ccp(on ? 9.f + 38.f - 10.f : 9.f + 10.f, 17.f), 7.5f, P(WHITE_C, 1.f));
+    drawRound(d, ccp(9.f, 7.f), CCSize(38.f, 20.f), R(10.f), P(on ? mm::accent() : OFF_C, 1.f));
+    float kx = on ? 9.f + 38.f - 10.f : 9.f + 10.f;
+    drawRound(d, ccp(kx - 7.5f, 17.f - 7.5f), CCSize(15.f, 15.f), R(7.5f), P(WHITE_C, 1.f));
 }
 
 bool inRect(CCPoint p, float x, float y, float w, float h) {
@@ -117,13 +155,17 @@ bool ModMenuPopup::init() {
         auto node = CCNode::create();
         node->setContentSize({32.f, 32.f});
         auto d = CCDrawNode::create();
-        d->drawDot(ccp(16.f, 16.f), 11.f, P(WHITE_C, 0.08f));
-        d->drawSegment(ccp(11.5f, 11.5f), ccp(20.5f, 20.5f), 0.8f, P(MUTED_C, 1.f));
-        d->drawSegment(ccp(11.5f, 20.5f), ccp(20.5f, 11.5f), 0.8f, P(MUTED_C, 1.f));
         node->addChild(d);
-        m_closeItem = CCMenuItemSpriteExtra::create(node, this, menu_selector(ModMenuPopup::onClosePressed));
-        m_closeItem->setPosition({W - 24.f, H - 22.f});
-        m_buttonMenu->addChild(m_closeItem);
+        auto item = CCMenuItemSpriteExtra::create(node, this, menu_selector(ModMenuPopup::onClosePressed));
+        item->setPosition({W - 24.f, H - 22.f});
+        m_buttonMenu->addChild(item);
+        m_closeItem = item;
+        m_redraw.push_back([d] {
+            d->clear();
+            drawRound(d, ccp(5.f, 5.f), CCSize(22.f, 22.f), R(11.f), P(WHITE_C, 0.08f));
+            d->drawSegment(ccp(11.5f, 11.5f), ccp(20.5f, 20.5f), 0.8f, P(MUTED_C, 1.f));
+            d->drawSegment(ccp(11.5f, 20.5f), ccp(20.5f, 11.5f), 0.8f, P(MUTED_C, 1.f));
+        });
     }
 
     // индикатор активной вкладки (двигается плавно)
@@ -168,9 +210,14 @@ CCPoint ModMenuPopup::cellOrigin(int col, int row) const {
     return ccp(COLX[col], ROW0 - row * ROW_STEP - CELL_H / 2.f);
 }
 
-void ModMenuPopup::addCellLabel(int tab, char const* text, float x, float y, bool muted) {
+void ModMenuPopup::addCellLabel(int tab, char const* text, float x, float y, bool muted, float maxW) {
     auto lbl = CCLabelBMFont::create(text, "chatFont.fnt");
-    lbl->setScale(muted ? 0.85f : 0.95f);
+    float sc = muted ? 0.85f : 0.95f;
+    lbl->setScale(sc);
+    if (maxW > 0.f) {
+        float w = lbl->getContentSize().width * sc;
+        if (w > maxW) lbl->setScale(sc * maxW / w); // текст не должен налезать на переключатель
+    }
     lbl->setAnchorPoint({0.f, 0.5f});
     lbl->setPosition({x, y});
     lbl->setColor(muted ? MUTED_C : TEXT_C);
@@ -180,9 +227,10 @@ void ModMenuPopup::addCellLabel(int tab, char const* text, float x, float y, boo
 
 void ModMenuPopup::addSwitchCell(int tab, mm::F flag, char const* label, int col, int row) {
     CCPoint o = this->cellOrigin(col, row);
-    bool cheat = mm::isCheat(flag);
-    m_cells[tab].push_back({o, CCSize(CELL_W, CELL_H), cheat});
-    this->addCellLabel(tab, label, o.x + (cheat ? 24.f : 14.f), o.y + CELL_H / 2.f);
+    bool risky = mm::isRisky(flag);
+    m_cells[tab].push_back({o, CCSize(CELL_W, CELL_H), risky});
+    float lx = o.x + (risky ? 24.f : 14.f);
+    this->addCellLabel(tab, label, lx, o.y + CELL_H / 2.f, false, (o.x + CELL_W - 10.f - 38.f - 8.f) - lx);
 
     auto node = CCNode::create();
     node->setContentSize({56.f, 34.f});
@@ -213,7 +261,7 @@ CCMenuItemSpriteExtra* ModMenuPopup::makePill(char const* text, float w, float h
         bool s = selected();
         d->clear();
         auto acc = mm::accent();
-        drawRound(d, ccp(0.f, 0.f), CCSize(w, h), h / 2.f, P(s ? acc : OFF_C, 1.f));
+        drawRound(d, ccp(0.f, 0.f), CCSize(w, h), R(h / 2.f), P(s ? acc : OFF_C, 1.f));
         lbl->setColor(s ? onColor(acc) : TEXT_C);
     });
     return item;
@@ -249,7 +297,7 @@ void ModMenuPopup::buildPlayer() {
 
     float ly = ROW0 - 4 * ROW_STEP;
     m_cells[T].push_back({ccp(22.f, ly), CCSize(0.f, 0.f), true});
-    this->addCellLabel(T, "Marked features disable leaderboard records", 32.f, ly, true);
+    this->addCellLabel(T, "Marked features turn on Safe mode automatically", 32.f, ly, true);
 }
 
 void ModMenuPopup::buildLevel() {
@@ -273,15 +321,32 @@ void ModMenuPopup::buildLevel() {
         m_redraw.push_back([d, lbl] {
             auto acc = mm::accent();
             d->clear();
-            drawRound(d, ccp(0.f, 0.f), CCSize(CELL_W, CELL_H), 10.f, P(acc, 0.16f), 1.f, P(acc, 0.75f));
+            drawRound(d, ccp(0.f, 0.f), CCSize(CELL_W, CELL_H), R(14.f), P(acc, 0.16f), 1.f, P(acc, 0.75f));
             lbl->setColor(acc);
         });
     }
 
     this->addSwitchCell(T, mm::F::Hitboxes, "Show hitboxes", 1, 0);
     this->addSwitchCell(T, mm::F::NoDeath, "No death effect", 0, 1);
+    this->addSwitchCell(T, mm::F::StartPos, "StartPos switcher", 1, 1);
+    this->addSwitchCell(T, mm::F::SmartStart, "Smart StartPos", 0, 2);
+    this->addSwitchCell(T, mm::F::FrameSmooth, "Frame smoothing", 1, 2);
 
-    this->addCellLabel(T, "Hitboxes are shown in every mode, not only practice", 20.f,
+    // FPS bypass
+    CCPoint o = this->cellOrigin(0, 3);
+    m_cells[T].push_back({o, CCSize(WIDE_W, CELL_H), false});
+    this->addCellLabel(T, "FPS bypass", o.x + 14.f, o.y + CELL_H / 2.f);
+    char const* names[5] = {"Off", "120", "240", "360", "480"};
+    for (int i = 0; i < 5; i++) {
+        auto pill = this->makePill(names[i], 50.f, 22.f, i,
+                                   menu_selector(ModMenuPopup::onFps),
+                                   [i] { return mm::state().fpsIdx == i; });
+        pill->setPosition({o.x + WIDE_W - 10.f - 266.f + 25.f + i * 54.f, o.y + CELL_H / 2.f});
+        m_buttonMenu->addChild(pill);
+        m_tabNodes[T].push_back(pill);
+    }
+
+    this->addCellLabel(T, "Hitboxes work in every mode. High FPS needs a fast phone", 20.f,
                        ROW0 - 4 * ROW_STEP, true);
 }
 
@@ -294,7 +359,7 @@ void ModMenuPopup::buildVisual() {
     this->addSwitchCell(T, mm::F::NoShake, "No shake", 0, 2);
     this->addSwitchCell(T, mm::F::NoMirror, "No mirror", 1, 2);
     this->addSwitchCell(T, mm::F::RainbowIcon, "Rainbow icon", 0, 3);
-    this->addSwitchCell(T, mm::F::RainbowBG, "Rainbow background", 1, 3);
+    this->addSwitchCell(T, mm::F::RainbowBG, "Rainbow BG", 1, 3);
     this->addSwitchCell(T, mm::F::UnlockAll, "Unlock all icons", 0, 4);
 }
 
@@ -317,29 +382,47 @@ void ModMenuPopup::buildTheme() {
         m_tabNodes[T].push_back(item);
         m_redraw.push_back([d] {
             d->clear();
-            d->drawDot(ccp(28.f, 17.f), 11.f, P(WHITE_C, 0.28f));
-            d->drawDot(ccp(28.f, 17.f), 9.f, P(mm::accent(), 1.f));
+            drawRound(d, ccp(16.f, 5.f), CCSize(24.f, 24.f), R(12.f), P(WHITE_C, 0.28f));
+            drawRound(d, ccp(18.f, 7.f), CCSize(20.f, 20.f), R(10.f), P(mm::accent(), 1.f));
         });
     }
 
     this->addSwitchCell(T, mm::F::Glass, "Liquid glass", 1, 0);
 
     // прозрачность стекла
-    CCPoint o = this->cellOrigin(0, 1);
-    m_cells[T].push_back({o, CCSize(WIDE_W, CELL_H), false});
-    this->addCellLabel(T, "Glass opacity", o.x + 14.f, o.y + CELL_H / 2.f);
-    char const* names[3] = {"Low", "Mid", "High"};
-    for (int i = 0; i < 3; i++) {
-        auto pill = this->makePill(names[i], 54.f, 22.f, i,
-                                   menu_selector(ModMenuPopup::onGlassOpacity),
-                                   [i] { return mm::state().glassOpacity == i; });
-        pill->setPosition({o.x + WIDE_W - 10.f - 170.f + 27.f + i * 58.f, o.y + CELL_H / 2.f});
-        m_buttonMenu->addChild(pill);
-        m_tabNodes[T].push_back(pill);
+    {
+        CCPoint o = this->cellOrigin(0, 1);
+        m_cells[T].push_back({o, CCSize(WIDE_W, CELL_H), false});
+        this->addCellLabel(T, "Glass opacity", o.x + 14.f, o.y + CELL_H / 2.f);
+        char const* names[3] = {"Low", "Mid", "High"};
+        for (int i = 0; i < 3; i++) {
+            auto pill = this->makePill(names[i], 54.f, 22.f, i,
+                                       menu_selector(ModMenuPopup::onGlassOpacity),
+                                       [i] { return mm::state().glassOpacity == i; });
+            pill->setPosition({o.x + WIDE_W - 10.f - 170.f + 27.f + i * 58.f, o.y + CELL_H / 2.f});
+            m_buttonMenu->addChild(pill);
+            m_tabNodes[T].push_back(pill);
+        }
+    }
+
+    // скругление углов
+    {
+        CCPoint o = this->cellOrigin(0, 2);
+        m_cells[T].push_back({o, CCSize(WIDE_W, CELL_H), false});
+        this->addCellLabel(T, "Corners", o.x + 14.f, o.y + CELL_H / 2.f);
+        char const* names[4] = {"Sharp", "Soft", "Round", "Max"};
+        for (int i = 0; i < 4; i++) {
+            auto pill = this->makePill(names[i], 54.f, 22.f, i,
+                                       menu_selector(ModMenuPopup::onCorner),
+                                       [i] { return mm::state().corner == i; });
+            pill->setPosition({o.x + WIDE_W - 10.f - 228.f + 27.f + i * 58.f, o.y + CELL_H / 2.f});
+            m_buttonMenu->addChild(pill);
+            m_tabNodes[T].push_back(pill);
+        }
     }
 
     this->addCellLabel(T, "Tip: drag the color window aside to preview the result live", 20.f,
-                       ROW0 - 3 * ROW_STEP, true);
+                       ROW0 - 4 * ROW_STEP, true);
 }
 
 void ModMenuPopup::buildPicker() {
@@ -410,7 +493,6 @@ void ModMenuPopup::buildPicker() {
         auto node = CCNode::create();
         node->setContentSize({20.f, 20.f});
         auto d = CCDrawNode::create();
-        d->drawDot(ccp(10.f, 10.f), 7.f, P(mm::presets()[i], 1.f));
         node->addChild(d);
         auto item = CCMenuItemSpriteExtra::create(node, this, menu_selector(ModMenuPopup::onPreset));
         item->setTag(i);
@@ -418,6 +500,10 @@ void ModMenuPopup::buildPicker() {
         item->setEnabled(false);
         m_buttonMenu->addChild(item, 101);
         m_cwItems.push_back({item, ccp(17.f + i * 17.f, 18.f)});
+        m_redraw.push_back([d, i] {
+            d->clear();
+            drawRound(d, ccp(3.f, 3.f), CCSize(14.f, 14.f), R(7.f), P(mm::presets()[i], 1.f));
+        });
     }
 
     m_cwPos = ccp(W - CW - 12.f, 12.f);
@@ -430,14 +516,15 @@ void ModMenuPopup::drawWindow() {
     auto acc = mm::accent();
     bool glass = mm::on(mm::F::Glass);
     float a = glass ? mm::GLASS_OPACITY[mm::state().glassOpacity] : 0.985f;
+    float r = R(20.f);
 
     m_bgNode->clear();
     ccColor3B base = mix(ccColor3B{17, 19, 25}, acc, 0.07f);
-    drawRound(m_bgNode, ccp(0.f, 0.f), CCSize(W, H), 16.f, P(base, a), 1.f, P(WHITE_C, glass ? 0.22f : 0.08f));
+    drawRound(m_bgNode, ccp(0.f, 0.f), CCSize(W, H), r, P(base, a), 1.f, P(WHITE_C, glass ? 0.22f : 0.08f));
     if (glass) {
         // блик в верхней половине и тонкая "кромка" света
-        drawRound(m_bgNode, ccp(2.f, H * 0.5f), CCSize(W - 4.f, H * 0.5f - 2.f), 14.f, P(WHITE_C, 0.045f));
-        m_bgNode->drawSegment(ccp(20.f, H - 1.5f), ccp(W - 20.f, H - 1.5f), 0.75f, P(WHITE_C, 0.38f));
+        drawRound(m_bgNode, ccp(2.f, H * 0.5f), CCSize(W - 4.f, H * 0.5f - 2.f), std::max(r - 2.f, 0.f), P(WHITE_C, 0.045f));
+        m_bgNode->drawSegment(ccp(r + 4.f, H - 1.5f), ccp(W - r - 4.f, H - 1.5f), 0.75f, P(WHITE_C, 0.38f));
     }
     // разделитель под вкладками
     m_bgNode->drawSegment(ccp(16.f, 205.f), ccp(W - 16.f, 205.f), 0.5f, P(WHITE_C, 0.08f));
@@ -450,10 +537,10 @@ void ModMenuPopup::drawCells() {
         n->clear();
         for (auto const& c : m_cells[t]) {
             if (c.s.width > 0.f) {
-                drawRound(n, c.o, c.s, 10.f, P(WHITE_C, glass ? 0.06f : 0.05f));
-                if (c.cheat) n->drawDot(ccp(c.o.x + 13.f, c.o.y + c.s.height / 2.f), 3.f, P(WARN_C, 1.f));
+                drawRound(n, c.o, c.s, R(14.f), P(WHITE_C, glass ? 0.06f : 0.05f));
+                if (c.cheat) drawCircle(n, ccp(c.o.x + 13.f, c.o.y + c.s.height / 2.f), 3.f, P(WARN_C, 1.f));
             } else if (c.cheat) {
-                n->drawDot(c.o, 3.f, P(WARN_C, 1.f)); // точка легенды
+                drawCircle(n, c.o, 3.f, P(WARN_C, 1.f)); // точка легенды
             }
         }
     }
@@ -552,7 +639,7 @@ void ModMenuPopup::redrawPicker() {
     auto acc = mm::accent();
 
     m_cwBg->clear();
-    drawRound(m_cwBg, ccp(0.f, 0.f), CCSize(CW, CH), 12.f, P(ccColor3B{20, 22, 29}, 0.985f), 1.f, P(WHITE_C, 0.14f));
+    drawRound(m_cwBg, ccp(0.f, 0.f), CCSize(CW, CH), R(14.f), P(ccColor3B{20, 22, 29}, 0.985f), 1.f, P(WHITE_C, 0.14f));
     m_cwBg->drawSegment(ccp(10.f, CH - HDR), ccp(CW - 10.f, CH - HDR), 0.5f, P(WHITE_C, 0.08f));
 
     auto hc = mm::hsv(s.hue, 1.f, 1.f);
@@ -560,13 +647,13 @@ void ModMenuPopup::redrawPicker() {
 
     float t = (std::max(s.val, mm::VMIN) - mm::VMIN) / (1.f - mm::VMIN);
     m_svCursor->clear();
-    m_svCursor->drawDot(ccp(0.f, 0.f), 6.f, P(WHITE_C, 1.f));
-    m_svCursor->drawDot(ccp(0.f, 0.f), 4.6f, P(acc, 1.f));
+    drawCircle(m_svCursor, ccp(0.f, 0.f), 6.f, P(WHITE_C, 1.f));
+    drawCircle(m_svCursor, ccp(0.f, 0.f), 4.6f, P(acc, 1.f));
     m_svCursor->setPosition({SV_X + s.sat * SV_W, SV_Y + t * SV_H});
 
     m_hueCursor->clear();
-    m_hueCursor->drawDot(ccp(0.f, 0.f), 7.5f, P(WHITE_C, 1.f));
-    m_hueCursor->drawDot(ccp(0.f, 0.f), 6.f, P(hc, 1.f));
+    drawCircle(m_hueCursor, ccp(0.f, 0.f), 7.5f, P(WHITE_C, 1.f));
+    drawCircle(m_hueCursor, ccp(0.f, 0.f), 6.f, P(hc, 1.f));
     m_hueCursor->setPosition({HUE_X + s.hue * HUE_W, HUE_Y + HUE_H / 2.f});
 }
 
@@ -647,8 +734,8 @@ void ModMenuPopup::onToggle(CCObject* sender) {
     if (flag == mm::F::Hitboxes) mm::applyHitboxes();
     if (flag == mm::F::AutoSafe && !mm::on(flag)) {
         FLAlertLayer::create("Auto safe mode off",
-                             "Cheats will no longer enable Safe mode automatically. "
-                             "Records made with cheats may get you banned from leaderboards.",
+                             "Risky features will no longer enable Safe mode automatically. "
+                             "Records made with them may get you banned from leaderboards.",
                              "OK")->show();
     }
     this->applyTheme();
@@ -657,6 +744,18 @@ void ModMenuPopup::onToggle(CCObject* sender) {
 void ModMenuPopup::onSpeed(CCObject* sender) {
     mm::state().speedIdx = static_cast<CCNode*>(sender)->getTag();
     mm::applySpeed(PlayLayer::get() != nullptr);
+    this->applyTheme();
+}
+
+void ModMenuPopup::onFps(CCObject* sender) {
+    mm::state().fpsIdx = static_cast<CCNode*>(sender)->getTag();
+    mm::saveTheme();
+    this->applyTheme();
+}
+
+void ModMenuPopup::onCorner(CCObject* sender) {
+    mm::state().corner = static_cast<CCNode*>(sender)->getTag();
+    mm::saveTheme();
     this->applyTheme();
 }
 

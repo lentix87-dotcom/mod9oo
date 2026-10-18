@@ -9,12 +9,13 @@ namespace mm {
 
 // ---------- список функций (флагов) ----------
 enum class F : int {
-    Noclip, Jump,                       // читы (ломают рекорды)
-    Safe, AutoSafe,                     // защита
-    Hitboxes, NoDeath,                  // уровень
+    Noclip, Jump,                         // читы
+    Safe, AutoSafe,                       // защита
+    Hitboxes, NoDeath,                    // уровень
+    StartPos, SmartStart, FrameSmooth,    // уровень (новое)
     Overlay, ShowFPS, HidePlayer, HideAttempts, NoShake, NoMirror,
-    RainbowIcon, RainbowBG, UnlockAll,  // косметика
-    Glass,                              // тема
+    RainbowIcon, RainbowBG, UnlockAll,    // визуал
+    Glass,                                // тема
     COUNT
 };
 inline constexpr size_t FCOUNT = static_cast<size_t>(F::COUNT);
@@ -23,19 +24,32 @@ inline char const* key(F x) {
     static constexpr char const* K[] = {
         "noclip", "jump", "safe_manual", "autosafe",
         "hitboxes", "nodeath",
+        "startpos", "smartstart", "framesmooth",
         "overlay", "showfps", "hideplayer", "hideattempts", "noshake", "nomirror",
         "rainbowicon", "rainbowbg", "unlockall",
         "glass"};
     return K[static_cast<int>(x)];
 }
-// Читерные функции: из-за них результаты нельзя отправлять в глобальный топ
-inline bool isCheat(F x) { return x == F::Noclip || x == F::Jump; }
+
+// "Рискованные" функции: дают преимущество или меняют прохождение.
+// Если включён Auto safe mode, любая из них автоматически включает Safe mode.
+inline bool isRisky(F x) {
+    switch (x) {
+        case F::Noclip: case F::Jump: case F::Hitboxes: case F::NoMirror:
+        case F::NoShake: case F::StartPos: case F::SmartStart:
+            return true;
+        default:
+            return false;
+    }
+}
 inline bool defaultValue(F x) { return x == F::AutoSafe || x == F::Overlay || x == F::Glass; }
-// Читы намеренно не сохраняются: после перезапуска они выключены
-inline bool persists(F x) { return !isCheat(x); }
+// Рискованные функции не сохраняются: после перезапуска они выключены
+inline bool persists(F x) { return !isRisky(x); }
 
 inline constexpr std::array<float, 6> SPEEDS{0.25f, 0.5f, 0.75f, 1.f, 1.5f, 2.f};
+inline constexpr std::array<int, 5> FPS_VALUES{0, 120, 240, 360, 480}; // 0 = выкл
 inline constexpr std::array<float, 3> GLASS_OPACITY{0.72f, 0.84f, 0.94f}; // Low / Mid / High
+inline constexpr std::array<float, 4> ROUND_K{0.f, 0.35f, 0.7f, 1.f};     // Sharp / Soft / Round / Max
 inline constexpr float VMIN = 0.35f; // минимальная яркость акцента, чтобы UI не пропадал
 
 inline std::array<cocos2d::ccColor3B, 8> const& presets() {
@@ -48,6 +62,8 @@ inline std::array<cocos2d::ccColor3B, 8> const& presets() {
 struct State {
     std::array<bool, FCOUNT> f{};
     int speedIdx = 3;          // 3 = x1.0 (не сохраняется)
+    int fpsIdx = 0;            // индекс в FPS_VALUES
+    int corner = 2;            // индекс в ROUND_K
     float hue = 0.54f;         // акцентный цвет в HSV
     float sat = 1.f;
     float val = 1.f;
@@ -67,6 +83,8 @@ inline bool& tainted() {
 
 inline bool on(F x) { return state().f[static_cast<size_t>(x)]; }
 inline void set(F x, bool v) { state().f[static_cast<size_t>(x)] = v; }
+inline float roundK() { return ROUND_K[state().corner]; }
+inline int fpsTarget() { return FPS_VALUES[state().fpsIdx]; }
 
 // ---------- цвет ----------
 inline cocos2d::ccColor3B hsv(float h, float s, float v) {
@@ -120,6 +138,8 @@ inline void saveTheme() {
     m->setSavedValue<double>("accS", s.sat);
     m->setSavedValue<double>("accV", s.val);
     m->setSavedValue<int>("glassOpacity", s.glassOpacity);
+    m->setSavedValue<int>("corner", s.corner);
+    m->setSavedValue<int>("fpsIdx", s.fpsIdx);
 }
 inline void load() {
     auto m = geode::Mod::get();
@@ -132,14 +152,24 @@ inline void load() {
     s.sat = std::clamp(static_cast<float>(m->getSavedValue<double>("accS", 1.0)), 0.f, 1.f);
     s.val = std::clamp(static_cast<float>(m->getSavedValue<double>("accV", 1.0)), VMIN, 1.f);
     s.glassOpacity = std::clamp(m->getSavedValue<int>("glassOpacity", 1), 0, 2);
+    s.corner = std::clamp(m->getSavedValue<int>("corner", 2), 0, 3);
+    s.fpsIdx = std::clamp(m->getSavedValue<int>("fpsIdx", 0), 0, 4);
 }
 
 // ---------- читы и Safe mode ----------
 inline float speed() { return SPEEDS[state().speedIdx]; }
-inline bool cheating() { return on(F::Noclip) || on(F::Jump) || state().speedIdx != 3; }
 
-// Safe mode активен, если он включён вручную, ИЛИ включён Auto safe и были читы
-// (в том числе использованные ранее в этом уровне)
+inline bool cheating() {
+    if (state().speedIdx != 3) return true;
+    for (size_t i = 0; i < FCOUNT; i++) {
+        F x = static_cast<F>(i);
+        if (isRisky(x) && on(x)) return true;
+    }
+    return false;
+}
+
+// Safe mode активен, если он включён вручную, ИЛИ включён Auto safe и были
+// рискованные функции (в том числе использованные ранее в этом уровне)
 inline bool safeActive() {
     return on(F::Safe) || (on(F::AutoSafe) && (cheating() || tainted()));
 }
@@ -149,6 +179,11 @@ inline std::string cheatList() {
     auto add = [&](char const* n) { if (!s.empty()) s += ", "; s += n; };
     if (on(F::Noclip)) add("noclip");
     if (on(F::Jump)) add("jump hack");
+    if (on(F::Hitboxes)) add("hitboxes");
+    if (on(F::NoMirror)) add("no mirror");
+    if (on(F::NoShake)) add("no shake");
+    if (on(F::StartPos)) add("startpos");
+    if (on(F::SmartStart)) add("smart startpos");
     if (state().speedIdx != 3) add("speed");
     if (s.empty()) s = "earlier cheat";
     return s;
