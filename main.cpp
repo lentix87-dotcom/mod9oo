@@ -58,11 +58,12 @@ class $modify(MMPlayLayer, PlayLayer) {
     };
 
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+        mm::tainted() = false; // новая сессия: чистая репутация
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
 
-        auto label = CCLabelBMFont::create("", "bigFont.fnt");
-        label->setScale(0.35f);
-        label->setOpacity(160);
+        auto label = CCLabelBMFont::create("", "chatFont.fnt");
+        label->setScale(0.9f);
+        label->setOpacity(190);
         label->setAnchorPoint({0.f, 1.f});
         label->setPosition({6.f, CCDirector::get()->getWinSize().height - 4.f});
         this->addChild(label, 1000);
@@ -77,7 +78,10 @@ class $modify(MMPlayLayer, PlayLayer) {
         PlayLayer::postUpdate(dt);
         auto& fields = m_fields;
 
-        // --- косметика (дёшево: пара присваиваний за кадр, и только если включено) ---
+        // Если читы использовались хоть раз за уровень, сессия помечается навсегда
+        if (mm::cheating()) mm::tainted() = true;
+
+        // --- косметика (дёшево: пара присваиваний, и только если включено) ---
         bool rIcon = mm::on(mm::F::RainbowIcon);
         bool rBG = mm::on(mm::F::RainbowBG);
         if (rIcon || rBG) {
@@ -85,13 +89,13 @@ class $modify(MMPlayLayer, PlayLayer) {
             if (fields->hue > 1.f) fields->hue -= 1.f;
         }
         if (rIcon) {
-            auto c1 = mm::hsv(fields->hue);
-            auto c2 = mm::hsv(fields->hue + 0.5f);
+            auto c1 = mm::rainbow(fields->hue);
+            auto c2 = mm::rainbow(fields->hue + 0.5f);
             if (m_player1) { m_player1->setColor(c1); m_player1->setSecondColor(c2); }
             if (m_player2) { m_player2->setColor(c2); m_player2->setSecondColor(c1); }
         }
         if (rBG && m_background) {
-            m_background->setColor(mm::hsv(fields->hue + 0.3f));
+            m_background->setColor(mm::rainbow(fields->hue + 0.3f));
         }
         if (mm::on(mm::F::HidePlayer)) {
             if (m_player1) m_player1->setVisible(false);
@@ -106,10 +110,17 @@ class $modify(MMPlayLayer, PlayLayer) {
         if (!show) return;
 
         std::string text = fmt::format("{:.1f}%", this->getCurrentPercent());
-        if (mm::on(mm::F::Noclip)) text += "  NOCLIP";
-        if (mm::state().speedIdx != 3) text += fmt::format("  x{}", mm::speed());
-        if (mm::cheating()) text += mm::safeActive() ? "  [SAFE: not saved]" : "  [UNSAFE]";
-        label->setColor(mm::accent());
+        if (mm::on(mm::F::ShowFPS)) {
+            float spf = std::max(CCDirector::get()->getSecondsPerFrame(), 0.0001f);
+            text += fmt::format("   {:.0f} FPS", 1.f / spf);
+        }
+        if (mm::on(mm::F::Noclip)) text += "   NOCLIP";
+        if (mm::on(mm::F::Jump)) text += "   JUMP";
+        if (mm::state().speedIdx != 3) text += fmt::format("   x{}", mm::speed());
+        if (mm::safeActive()) text += "   SAFE";
+        else if (mm::cheating()) text += "   UNSAFE";
+        label->setColor(mm::safeActive() ? ccColor3B{96, 222, 144} : mm::accent());
+        if (!mm::safeActive() && mm::cheating()) label->setColor({255, 170, 60});
         label->setString(text.c_str());
     }
 
@@ -120,6 +131,7 @@ class $modify(MMPlayLayer, PlayLayer) {
 
     void onQuit() {
         mm::applySpeed(false);
+        mm::tainted() = false;
         PlayLayer::onQuit();
     }
 };
@@ -132,7 +144,7 @@ class $modify(MMPlayerObject, PlayerObject) {
     }
 };
 
-// Safe mode: не сохраняем результат прохождения, пока включены читы
+// Safe mode (часть 1): процент прохождения не сохраняется
 class $modify(MMGJGameLevel, GJGameLevel) {
     void savePercentage(int percent, bool isPracticeMode, int clicks, int attempts, bool isChkValid) {
         if (mm::safeActive()) return;
