@@ -1,0 +1,12 @@
+{
+  "geode": "5.8.0",
+  "gd": {
+    "android": "2.2081"
+  },
+  "id": "yourname.modmenu",
+  "name": "LOON MENU",
+  "version": "v1.0.0",
+  "developer": "Чина Минактв",
+  "description": "Описание не нужно, ведь оно находится во мне (Чина Минаков)",
+  "tags": ["utility", "interface"]
+}
