@@ -1,5 +1,6 @@
 #include <Geode/Geode.hpp>
-#include <Geode/modify/CCScheduler.hpp>
+#include <Geode/modify/CCDirector.hpp>
+#include <Geode/modify/CCTouchDispatcher.hpp>
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
@@ -17,8 +18,12 @@ namespace {
 
 constexpr float PI_F = 3.14159265f;
 
-// Правильный CCW-генератор скруглённого прямоугольника (исправляет баг с неработающим скруглением!)
-void drawSmoothRoundRect(CCDrawNode* n, CCPoint o, CCSize s, float r, ccColor4F fill, float bw, ccColor4F bc) {
+// Правильный premultiplied цвет для CCDrawNode (исправляет неработающий Opacity!)
+ccColor4F PM(ccColor3B c, float a) {
+    return { (c.r / 255.f) * a, (c.g / 255.f) * a, (c.b / 255.f) * a, a };
+}
+
+void drawBtnRoundRect(CCDrawNode* n, CCPoint o, CCSize s, float r, ccColor4F fill, float bw, ccColor4F bc) {
     if (s.width < 1.f || s.height < 1.f) return;
     r = std::clamp(r, 0.f, std::min(s.width, s.height) * 0.5f - 0.1f);
 
@@ -42,7 +47,6 @@ void drawSmoothRoundRect(CCDrawNode* n, CCPoint o, CCSize s, float r, ccColor4F 
                 pushUnique(cx + r * std::cos(a), cy + r * std::sin(a));
             }
         };
-        // Против часовой стрелки (CCW): правый-верх -> левый-верх -> левый-низ -> правый-низ
         addCorner(o.x + s.width - r, o.y + s.height - r, 0.f);
         addCorner(o.x + r,           o.y + s.height - r, PI_F * 0.5f);
         addCorner(o.x + r,           o.y + r,           PI_F);
@@ -56,8 +60,8 @@ void drawSmoothRoundRect(CCDrawNode* n, CCPoint o, CCSize s, float r, ccColor4F 
     }
 }
 
-// ----- Плавающая кнопка "L" -----
-class FloatingLButton : public CCLayer {
+// ----- Глобальная кнопка "L", которая НЕ зависит от смены сцен и НЕ моргает -----
+class FloatingLButton : public CCNode, public CCTargetedTouchDelegate {
     CCDrawNode* m_bg = nullptr;
     CCLabelBMFont* m_lbl = nullptr;
     bool m_dragging = false;
@@ -66,45 +70,28 @@ class FloatingLButton : public CCLayer {
     CCPoint m_nodeStart;
     CCPoint m_targetPos;
     bool m_inPause = false;
+    bool m_touchRegistered = false;
 
 public:
     static FloatingLButton* s_instance;
 
-    static void ensureOnRunningScene() {
-        auto dir = CCDirector::get();
-        if (!dir) return;
-        auto scene = dir->getRunningScene();
-        if (!scene) return;
-
+    static FloatingLButton* get() {
         if (!s_instance) {
             s_instance = new FloatingLButton();
-            if (s_instance->init()) {
-                s_instance->retain();
-            } else {
-                delete s_instance;
-                s_instance = nullptr;
-                return;
-            }
+            s_instance->init();
+            s_instance->retain();
         }
-
-        if (s_instance->getParent() != scene) {
-            s_instance->removeFromParentAndCleanup(false);
-            scene->addChild(s_instance, 10500);
-            // Перерегистрируем тач-делегат с максимальным приоритетом при каждой смене сцены!
-            if (auto td = dir->getTouchDispatcher()) {
-                td->removeDelegate(s_instance);
-                td->addTargetedDelegate(s_instance, -600, true);
-            }
-        }
+        return s_instance;
     }
 
     void setPausedState(bool paused) { m_inPause = paused; }
 
     bool init() override {
-        if (!CCLayer::init()) return false;
+        if (!CCNode::init()) return false;
 
         auto ws = CCDirector::get()->getWinSize();
-        if (mm::state().btnX < 10.f || mm::state().btnY < 10.f) {
+        if (mm::state().btnX < 10.f || mm::state().btnY < 10.f ||
+            mm::state().btnX > ws.width - 10.f || mm::state().btnY > ws.height - 10.f) {
             mm::state().btnX = 38.f;
             mm::state().btnY = ws.height - 64.f;
         }
@@ -116,7 +103,6 @@ public:
         this->setPosition(m_targetPos);
 
         m_bg = CCDrawNode::create();
-        m_bg->setBlendFunc({GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA});
         this->addChild(m_bg, 1);
 
         m_lbl = CCLabelBMFont::create("L", "bigFont.fnt");
@@ -124,80 +110,76 @@ public:
         m_lbl->setPosition({19.f, 20.f});
         this->addChild(m_lbl, 2);
 
-        this->redraw();
-        this->scheduleUpdate();
         return true;
     }
 
-    void redraw() {
-        m_bg->clear();
-        float a = std::clamp(mm::state().btnOpacity, 0.25f, 1.0f);
-        float rad = std::clamp(mm::state().btnRadius, 0.f, 17.5f);
-        auto acc = mm::accent();
-
-        // Стеклянно-чёрная кнопка со скруглёнными углами
-        drawSmoothRoundRect(m_bg, ccp(1.f, 1.f), CCSize(36.f, 36.f), rad,
-                            {0.05f, 0.05f, 0.08f, a}, 1.2f,
-                            {acc.r / 255.f, acc.g / 255.f, acc.b / 255.f, a});
-
-        m_lbl->setOpacity(static_cast<GLubyte>(255.f * a));
-        if (!m_dragging) {
-            this->setScale(mm::state().btnScale);
-        }
-    }
-
-    void update(float dt) override {
-        // 1. Когда открыто само мод-меню — плавающая кнопка L скрывается!
-        if (mm::state().menuOpen) {
-            this->setVisible(false);
-            return;
-        }
-
-        // 2. Плавное движение (Smooth Lerp) к пальцу
-        float realDt = std::clamp(dt / std::max(mm::speed(), 0.25f), 0.001f, 0.05f);
-        CCPoint cur = this->getPosition();
-        CCPoint next = ccp(
-            cur.x + (m_targetPos.x - cur.x) * std::min(1.f, realDt * 20.f),
-            cur.y + (m_targetPos.y - cur.y) * std::min(1.f, realDt * 20.f)
-        );
-        this->setPosition(next);
-        this->redraw();
-
-        // 3. Точная логика видимости: В меню / В игре / В паузе
+    bool shouldBeVisible() const {
+        if (mm::state().menuOpen) return false;
         auto pl = PlayLayer::get();
-        if (!pl) {
-            m_inPause = false;
-            this->setVisible(mm::on(mm::F::BtnShowInMenu));
-            return;
-        }
+        if (!pl) return true; // В любых меню игры видна ВСЕГДА!
+
         auto scene = CCDirector::get()->getRunningScene();
         bool paused = m_inPause || pl->m_isPaused || (scene && scene->getChildByType<PauseLayer>(0) != nullptr);
-        if (paused) {
-            this->setVisible(mm::on(mm::F::BtnShowInPause));
-        } else {
-            this->setVisible(mm::on(mm::F::BtnShowInGame));
+        if (paused) return mm::on(mm::F::BtnShowInPause);
+        return !mm::on(mm::F::BtnHideInGame);
+    }
+
+    void tickAndDraw() {
+        auto dir = CCDirector::get();
+        if (!dir) return;
+
+        // Гарантируем регистрацию тача в CCTouchDispatcher
+        if (auto td = dir->getTouchDispatcher()) {
+            if (!m_touchRegistered) {
+                td->addTargetedDelegate(this, -1000, true);
+                m_touchRegistered = true;
+            }
         }
+
+        if (!this->shouldBeVisible()) return;
+
+        // Плавная интерполяция позиции (Smooth Lerp)
+        float dt = std::clamp(dir->getDeltaTime() / std::max(mm::speed(), 0.25f), 0.001f, 0.05f);
+        CCPoint cur = this->getPosition();
+        CCPoint next = ccp(
+            cur.x + (m_targetPos.x - cur.x) * std::min(1.f, dt * 18.f),
+            cur.y + (m_targetPos.y - cur.y) * std::min(1.f, dt * 18.f)
+        );
+        this->setPosition(next);
+
+        // Применяем актуальные Size, Opacity и Corner Radius каждый кадр!
+        float a = std::clamp(mm::state().btnOpacity, 0.20f, 1.0f);
+        float rad = std::clamp(mm::state().btnRadius, 0.f, 17.5f);
+        float sc = std::clamp(mm::state().btnScale, 0.55f, 1.60f);
+        auto acc = mm::accent();
+
+        m_bg->clear();
+        drawBtnRoundRect(m_bg, ccp(1.f, 1.f), CCSize(36.f, 36.f), rad,
+                         PM({12, 12, 18}, a), 1.2f, PM(acc, a));
+
+        m_lbl->setOpacity(static_cast<GLubyte>(255.f * a));
+        this->setScale(m_dragging ? sc * 0.90f : sc);
+
+        // Рисуем кнопку поверх любой сцены (без перепривязки к CCScene — поэтому она НЕ моргает!)
+        this->visit();
     }
 
     bool ccTouchBegan(CCTouch* touch, CCEvent*) override {
-        if (!this->isVisible() || mm::state().menuOpen) return false;
+        if (!this->shouldBeVisible()) return false;
 
-        // Проверяем попадание в экранных координатах с учётом текущего масштаба btnScale!
-        CCPoint touchWorld = touch->getLocation();
-        CCPoint btnCenter = this->getPosition();
-        float halfSize = 21.f * std::max(0.6f, mm::state().btnScale);
+        CCPoint touchPos = touch->getLocation();
+        CCPoint center = this->getPosition();
+        float halfHit = 20.f * std::clamp(mm::state().btnScale, 0.55f, 1.60f);
 
-        if (std::abs(touchWorld.x - btnCenter.x) > halfSize ||
-            std::abs(touchWorld.y - btnCenter.y) > halfSize) {
+        if (std::abs(touchPos.x - center.x) > halfHit ||
+            std::abs(touchPos.y - center.y) > halfHit) {
             return false;
         }
 
         m_dragging = true;
         m_moved = false;
-        m_touchStart = touchWorld;
+        m_touchStart = touchPos;
         m_nodeStart = m_targetPos;
-        this->stopAllActions();
-        this->setScale(mm::state().btnScale * 0.90f);
         return true;
     }
 
@@ -218,7 +200,6 @@ public:
     void ccTouchEnded(CCTouch*, CCEvent*) override {
         if (!m_dragging) return;
         m_dragging = false;
-        this->setScale(mm::state().btnScale);
         mm::saveAll();
 
         if (!m_moved) {
@@ -228,7 +209,6 @@ public:
 
     void ccTouchCancelled(CCTouch*, CCEvent*) override {
         m_dragging = false;
-        this->setScale(mm::state().btnScale);
     }
 };
 
@@ -241,24 +221,27 @@ $on_mod(Loaded) {
     mm::load();
 }
 
-class $modify(MMGlobalBtnScheduler, CCScheduler) {
-    void update(float dt) {
-        CCScheduler::update(dt);
-        FloatingLButton::ensureOnRunningScene();
+// Хук CCDirector::drawScene рисует кнопку L поверх всех переходов — 0 морганий и 100% видимость!
+class $modify(MMLoonDirector, CCDirector) {
+    void drawScene() {
+        CCDirector::drawScene();
+        if (this->getRunningScene()) {
+            FloatingLButton::get()->tickAndDraw();
+        }
     }
 };
 
 class $modify(MMPauseLayer, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
-        if (FloatingLButton::s_instance) FloatingLButton::s_instance->setPausedState(true);
+        FloatingLButton::get()->setPausedState(true);
     }
     void onResume(CCObject* sender) {
-        if (FloatingLButton::s_instance) FloatingLButton::s_instance->setPausedState(false);
+        FloatingLButton::get()->setPausedState(false);
         PauseLayer::onResume(sender);
     }
     void onQuit(CCObject* sender) {
-        if (FloatingLButton::s_instance) FloatingLButton::s_instance->setPausedState(false);
+        FloatingLButton::get()->setPausedState(false);
         PauseLayer::onQuit(sender);
     }
 };
@@ -283,7 +266,6 @@ class $modify(MMPlayLayer, PlayLayer) {
 
         auto root = CCNode::create();
         auto bg = CCDrawNode::create();
-        bg->setBlendFunc({GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA});
         auto label = CCLabelBMFont::create("", "chatFont.fnt");
         label->setAnchorPoint({0.f, 0.5f});
 
@@ -298,7 +280,7 @@ class $modify(MMPlayLayer, PlayLayer) {
 
         mm::applySpeed(true);
         mm::applyHitboxes();
-        if (FloatingLButton::s_instance) FloatingLButton::s_instance->setPausedState(false);
+        FloatingLButton::get()->setPausedState(false);
         return true;
     }
 
@@ -366,7 +348,7 @@ class $modify(MMPlayLayer, PlayLayer) {
             if (mm::safeActive()) append("SAFE");
             else if (mm::cheating()) append("CHEAT");
         }
-        if (text.empty()) text = "L-Client";
+        if (text.empty()) text = "Loon Client";
 
         f->ovLabel->setString(text.c_str());
         float sc = mm::state().ovScale;
@@ -390,9 +372,8 @@ class $modify(MMPlayLayer, PlayLayer) {
         if (mm::on(mm::F::OvBg)) {
             float a = 0.75f * mm::state().ovOpacity;
             auto acc = mm::accent();
-            drawSmoothRoundRect(f->ovBg, ccp(0.f, 0.f), CCSize(tw + padX * 2.f, th), 5.f,
-                                {0.05f, 0.05f, 0.08f, a}, 0.8f,
-                                {acc.r / 255.f, acc.g / 255.f, acc.b / 255.f, a * 0.7f});
+            drawBtnRoundRect(f->ovBg, ccp(0.f, 0.f), CCSize(tw + padX * 2.f, th), 5.f,
+                             PM({12, 12, 18}, a), 0.8f, PM(acc, a * 0.7f));
         }
     }
 
@@ -404,7 +385,7 @@ class $modify(MMPlayLayer, PlayLayer) {
     void onQuit() {
         mm::applySpeed(false);
         mm::tainted() = false;
-        if (FloatingLButton::s_instance) FloatingLButton::s_instance->setPausedState(false);
+        FloatingLButton::get()->setPausedState(false);
         PlayLayer::onQuit();
     }
 };
