@@ -18,7 +18,7 @@ enum class F : int {
     Glow,                                 // Themes: белое свечение в меню
     LiquidGlass,                          // Themes: стекло Loon Client
     BgBlur,                               // Themes: размытие экрана позади меню
-    LiveGifBg,                            // Themes: живой анимированный GIF-фон в меню
+    CustomWallpaper,                      // Themes: свои обои (Image / GIF) на весь фон меню
     BtnHideInGame,                        // Client: скрывать кнопку L во время игры
     BtnShowInPause,                       // Client: показывать кнопку L в паузе
     OvPercent, OvCPS, OvTps, OvAttempts, OvStatus, OvBg, // Под-настройки Overlay
@@ -33,7 +33,7 @@ inline char const* key(F x) {
         "tpsbypass",
         "overlay", "showfps", "hideplayer", "hideattempts", "noshake", "nomirror",
         "rainbowicon", "rainbowbg", "unlockall",
-        "glow", "liquidglass", "bgblur", "livegifbg",
+        "glow", "liquidglass", "bgblur", "customwallpaper",
         "btnhideingame", "btnshowinpause",
         "ov_percent", "ov_cps", "ov_tps", "ov_attempts", "ov_status", "ov_bg"
     };
@@ -61,7 +61,7 @@ inline char const* title(F x) {
         case F::Glow: return "White Glow";
         case F::LiquidGlass: return "Loon Glass";
         case F::BgBlur: return "Screen Blur";
-        case F::LiveGifBg: return "Live GIF BG";
+        case F::CustomWallpaper: return "Wallpaper / GIF";
         case F::BtnHideInGame: return "Hide L-Btn in Game";
         case F::BtnShowInPause: return "Show L-Btn in Pause";
         default: return "";
@@ -128,7 +128,7 @@ struct State {
     float rainbowSpeed = 0.25f;
 
     int particleType = 1;        // 0 = Off, 1 = Winter, 2 = Autumn, 3 = Sakura
-    int themeIdx = 1;            // 0 = Loon Frost, 1 = Amoled Dark White, 7 = Custom
+    int themeIdx = 0;            // 0..6 = Пресеты, 7 = Custom Palette
     float glowIntensity = 0.60f;
     float glassAlpha = 0.80f;
     float bgBlurStrength = 0.80f;
@@ -136,10 +136,10 @@ struct State {
     int pressAnimType = 1;
     float pressAnimPower = 0.88f;
 
-    // Настройки живой GIF-анимации фона меню (Live GIF BG)
-    int gifQuality = 1;          // 0 = 360p (Fast), 1 = 640p (Balanced), 2 = 1080p (HD)
-    int gifStyle = 0;            // 0 = Cyber Matrix, 1 = Synthwave Grid, 2 = Aurora Waves
-    float gifOpacity = 0.55f;    // Прозрачность живой гифки в меню (0.15 .. 1.0)
+    // Импортированные обои / GIF-анимация фона меню
+    int gifQuality = 1;          // 0 = 360p (Fast), 1 = 640p (Balanced), 2 = 1080p (Original HD)
+    float gifOpacity = 0.65f;    // Прозрачность обоев/гифки в меню (0.15 .. 1.0)
+    std::string customBgPath;    // Путь к выбранному пользователем .png / .jpg / .gif файлу
 
     int editSlot = 0;
     float customH[3] = {0.62f, 0.64f, 0.64f};
@@ -243,8 +243,8 @@ inline void saveAll() {
     m->setSavedValue<double>("bgBlurStrength", s.bgBlurStrength);
     m->setSavedValue<double>("menuRadius", s.menuRadius);
     m->setSavedValue<int>("gifQuality", s.gifQuality);
-    m->setSavedValue<int>("gifStyle", s.gifStyle);
     m->setSavedValue<double>("gifOpacity", s.gifOpacity);
+    m->setSavedValue<std::string>("customBgPath", s.customBgPath);
     m->setSavedValue<int>("pressAnimType", s.pressAnimType);
     m->setSavedValue<double>("btnX", s.btnX);
     m->setSavedValue<double>("btnY", s.btnY);
@@ -270,14 +270,14 @@ inline void load() {
     }
     s.customTps = std::clamp(m->getSavedValue<int>("customTps", 240), 60, 2400);
     s.particleType = std::clamp(m->getSavedValue<int>("particleType", 1), 0, 3);
-    s.themeIdx = std::clamp(m->getSavedValue<int>("themeIdx", 1), 0, 7);
+    s.themeIdx = std::clamp(m->getSavedValue<int>("themeIdx", 0), 0, 7);
     s.glowIntensity = std::clamp(static_cast<float>(m->getSavedValue<double>("glowIntensity", 0.60)), 0.f, 1.f);
     s.glassAlpha = std::clamp(static_cast<float>(m->getSavedValue<double>("glassAlpha", 0.80)), 0.40f, 0.96f);
     s.bgBlurStrength = std::clamp(static_cast<float>(m->getSavedValue<double>("bgBlurStrength", 0.80)), 0.f, 1.f);
     s.menuRadius = std::clamp(static_cast<float>(m->getSavedValue<double>("menuRadius", 18.0)), 0.f, 28.f);
     s.gifQuality = std::clamp(m->getSavedValue<int>("gifQuality", 1), 0, 2);
-    s.gifStyle = std::clamp(m->getSavedValue<int>("gifStyle", 0), 0, 2);
-    s.gifOpacity = std::clamp(static_cast<float>(m->getSavedValue<double>("gifOpacity", 0.55)), 0.15f, 1.f);
+    s.gifOpacity = std::clamp(static_cast<float>(m->getSavedValue<double>("gifOpacity", 0.65)), 0.15f, 1.f);
+    s.customBgPath = m->getSavedValue<std::string>("customBgPath", "");
     s.pressAnimType = std::clamp(m->getSavedValue<int>("pressAnimType", 1), 0, 2);
     s.btnX = static_cast<float>(m->getSavedValue<double>("btnX", -1.0));
     s.btnY = static_cast<float>(m->getSavedValue<double>("btnY", -1.0));

@@ -3,6 +3,7 @@
 #include <Geode/binding/GameManager.hpp>
 #include <Geode/binding/SimplePlayer.hpp>
 #include <cmath>
+#include <fstream>
 
 namespace {
 
@@ -79,7 +80,6 @@ void drawRoundRect(CCDrawNode* n, CCPoint o, CCSize s, float r, ccColor4F fill,
     }
 }
 
-// Идеально гладкий круг (32 сегмента по умолчанию — никаких угловатых снежинок и ползунков!)
 void drawSmoothCircle(CCDrawNode* n, CCPoint c, float r, ccColor4F col, int segs = 32) {
     std::vector<CCPoint> pts(segs);
     for (int i = 0; i < segs; i++) {
@@ -106,15 +106,233 @@ void drawLoonGlass(CCDrawNode* n, CCPoint o, CCSize s, float r, ccColor3B col, f
                    ccColor3B borderCol = {255, 255, 255}, float borderAlpha = 0.12f) {
     bool glassOn = mm::on(mm::F::LiquidGlass);
     float glassK = glassOn ? mm::state().glassAlpha : 0.98f;
-    float finalAlpha = std::clamp(alpha * glassK, 0.35f, 0.98f);
+    // Если включены свои обои/GIF, делаем карточки чуть прозрачнее, чтобы обои красиво просвечивали!
+    if (mm::on(mm::F::CustomWallpaper) && !mm::state().customBgPath.empty()) {
+        glassK *= 0.88f;
+    }
+    float finalAlpha = std::clamp(alpha * glassK, 0.28f, 0.98f);
 
     drawRoundRect(n, o, s, r, P(col, finalAlpha), 0.85f, P(borderCol, borderAlpha));
 
     if (glassOn) {
-        float hazeIntensity = (1.0f - mm::state().glassAlpha) * 0.18f + 0.03f;
+        float hazeIntensity = (1.0f - mm::state().glassAlpha) * 0.16f + 0.025f;
         drawRoundRect(n, ccp(o.x + 1.f, o.y + 1.f), CCSize(s.width - 2.f, s.height - 2.f),
                       std::max(0.f, r - 1.f), P({235, 242, 255}, hazeIntensity));
     }
+}
+
+// ----- Встроенный лёгкий декодер GIF89a (без внешних библиотек, с поддержкой даунскейла 360p/640p/1080p) -----
+bool decodeGifFile(std::string const& path, int qualityMode,
+                   std::vector<Ref<CCTexture2D>>& outFrames,
+                   std::vector<float>& outDelays) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    auto fsize = file.tellg();
+    if (fsize < 14 || fsize > 45 * 1024 * 1024) return false; // Защита от слишком огромных файлов
+    file.seekg(0, std::ios::beg);
+    std::vector<uint8_t> d(static_cast<size_t>(fsize));
+    if (!file.read(reinterpret_cast<char*>(d.data()), fsize)) return false;
+
+    if (d[0] != 'G' || d[1] != 'I' || d[2] != 'F') return false;
+
+    int canvasW = d[6] | (d[7] << 8);
+    int canvasH = d[8] | (d[9] << 8);
+    if (canvasW <= 0 || canvasH <= 0 || canvasW > 4096 || canvasH > 4096) return false;
+
+    uint8_t packed = d[10];
+    size_t pos = 13;
+    std::vector<uint8_t> gct;
+    if (packed & 0x80) {
+        int gctSize = 1 << ((packed & 7) + 1);
+        if (pos + gctSize * 3 > d.size()) return false;
+        gct.assign(d.begin() + pos, d.begin() + pos + gctSize * 3);
+        pos += gctSize * 3;
+    }
+
+    // Определяем целевое разрешение под выбранное качество (360p / 640p / 1080p) для отсутствия лагов
+    int maxTargetW = (qualityMode == 0) ? 360 : (qualityMode == 1 ? 640 : 1080);
+    int downScale = std::max(1, canvasW / maxTargetW);
+    int outW = std::max(1, canvasW / downScale);
+    int outH = std::max(1, canvasH / downScale);
+
+    std::vector<uint8_t> canvas(static_cast<size_t>(canvasW) * canvasH * 4, 0);
+    std::vector<uint8_t> scaledBuf(static_cast<size_t>(outW) * outH * 4, 0);
+
+    int transIndex = -1;
+    float delaySec = 0.08f;
+
+    while (pos < d.size()) {
+        uint8_t block = d[pos++];
+        if (block == 0x3B) break; // Конец GIF
+
+        if (block == 0x21) { // Extension
+            if (pos >= d.size()) break;
+            uint8_t extLabel = d[pos++];
+            if (extLabel == 0xF9 && pos + 6 <= d.size()) { // Graphic Control Extension
+                uint8_t blkSize = d[pos++];
+                if (blkSize >= 4) {
+                    uint8_t gcePacked = d[pos];
+                    uint16_t delayCs = d[pos + 1] | (d[pos + 2] << 8);
+                    uint8_t tIdx = d[pos + 3];
+                    transIndex = (gcePacked & 1) ? tIdx : -1;
+                    delaySec = std::max(0.03f, static_cast<float>(delayCs) / 100.f);
+                }
+                pos += blkSize;
+                if (pos < d.size() && d[pos] == 0) pos++;
+            } else {
+                while (pos < d.size()) {
+                    uint8_t subLen = d[pos++];
+                    if (subLen == 0) break;
+                    pos += subLen;
+                }
+            }
+        }
+        else if (block == 0x2C) { // Image Descriptor (Кадр)
+            if (pos + 9 > d.size()) break;
+            int left = d[pos] | (d[pos + 1] << 8);
+            int top  = d[pos + 2] | (d[pos + 3] << 8);
+            int w    = d[pos + 4] | (d[pos + 5] << 8);
+            int h    = d[pos + 6] | (d[pos + 7] << 8);
+            uint8_t imgPacked = d[pos + 8];
+            pos += 9;
+
+            std::vector<uint8_t> const* pal = &gct;
+            std::vector<uint8_t> lct;
+            if (imgPacked & 0x80) {
+                int lctSize = 1 << ((imgPacked & 7) + 1);
+                if (pos + lctSize * 3 > d.size()) break;
+                lct.assign(d.begin() + pos, d.begin() + pos + lctSize * 3);
+                pos += lctSize * 3;
+                pal = &lct;
+            }
+
+            if (pos >= d.size()) break;
+            int minCodeSize = d[pos++];
+            if (minCodeSize < 2 || minCodeSize > 11) break;
+
+            std::vector<uint8_t> compressed;
+            while (pos < d.size()) {
+                uint8_t subLen = d[pos++];
+                if (subLen == 0) break;
+                if (pos + subLen > d.size()) break;
+                compressed.insert(compressed.end(), d.begin() + pos, d.begin() + pos + subLen);
+                pos += subLen;
+            }
+
+            // Быстрая распаковка LZW
+            int clearCode = 1 << minCodeSize;
+            int eoiCode = clearCode + 1;
+            int availCode = clearCode + 2;
+            int codeSize = minCodeSize + 1;
+            int codeMask = (1 << codeSize) - 1;
+            int oldCode = -1;
+
+            std::vector<int> prefix(4096, 0);
+            std::vector<uint8_t> suffix(4096, 0);
+            std::vector<uint8_t> stack(4096, 0);
+            for (int i = 0; i < clearCode; i++) suffix[i] = static_cast<uint8_t>(i);
+
+            int bitBuf = 0, bitCnt = 0, firstChar = 0, sp = 0;
+            size_t bytePos = 0;
+            int pxIdx = 0, totalPx = w * h;
+
+            while (pxIdx < totalPx) {
+                while (sp > 0 && pxIdx < totalPx) {
+                    uint8_t colorIdx = stack[--sp];
+                    int cx = left + (pxIdx % w);
+                    int cy = top + (pxIdx / w);
+                    if (cx >= 0 && cx < canvasW && cy >= 0 && cy < canvasH) {
+                        if (colorIdx != transIndex && static_cast<size_t>(colorIdx) * 3 + 2 < pal->size()) {
+                            size_t dst = (static_cast<size_t>(cy) * canvasW + cx) * 4;
+                            canvas[dst + 0] = (*pal)[colorIdx * 3 + 0];
+                            canvas[dst + 1] = (*pal)[colorIdx * 3 + 1];
+                            canvas[dst + 2] = (*pal)[colorIdx * 3 + 2];
+                            canvas[dst + 3] = 255;
+                        }
+                    }
+                    pxIdx++;
+                }
+                if (pxIdx >= totalPx) break;
+
+                while (bitCnt < codeSize && bytePos < compressed.size()) {
+                    bitBuf |= static_cast<int>(compressed[bytePos++]) << bitCnt;
+                    bitCnt += 8;
+                }
+                if (bitCnt < codeSize) break;
+
+                int code = bitBuf & codeMask;
+                bitBuf >>= codeSize;
+                bitCnt -= codeSize;
+
+                if (code == clearCode) {
+                    codeSize = minCodeSize + 1;
+                    codeMask = (1 << codeSize) - 1;
+                    availCode = clearCode + 2;
+                    oldCode = -1;
+                    continue;
+                }
+                if (code == eoiCode) break;
+
+                if (oldCode == -1) {
+                    firstChar = suffix[code];
+                    stack[sp++] = static_cast<uint8_t>(firstChar);
+                    oldCode = code;
+                    continue;
+                }
+
+                int inCode = code;
+                if (code >= availCode) {
+                    stack[sp++] = static_cast<uint8_t>(firstChar);
+                    code = oldCode;
+                }
+                while (code >= clearCode && sp < 4095) {
+                    stack[sp++] = suffix[code];
+                    code = prefix[code];
+                }
+                firstChar = suffix[code];
+                if (sp < 4095) stack[sp++] = static_cast<uint8_t>(firstChar);
+
+                if (availCode < 4096) {
+                    prefix[availCode] = oldCode;
+                    suffix[availCode] = static_cast<uint8_t>(firstChar);
+                    availCode++;
+                    if ((availCode & codeMask) == 0 && availCode < 4096) {
+                        codeSize++;
+                        codeMask = (1 << codeSize) - 1;
+                    }
+                }
+                oldCode = inCode;
+            }
+
+            // Даунскейл кадра под выбранное качество (360p/640p/1080p) и загрузка в текстуру GPU
+            for (int y = 0; y < outH; y++) {
+                int srcY = std::min(canvasH - 1, y * downScale);
+                for (int x = 0; x < outW; x++) {
+                    int srcX = std::min(canvasW - 1, x * downScale);
+                    size_t sOff = (static_cast<size_t>(srcY) * canvasW + srcX) * 4;
+                    size_t dOff = (static_cast<size_t>(y) * outW + x) * 4;
+                    scaledBuf[dOff + 0] = canvas[sOff + 0];
+                    scaledBuf[dOff + 1] = canvas[sOff + 1];
+                    scaledBuf[dOff + 2] = canvas[sOff + 2];
+                    scaledBuf[dOff + 3] = canvas[sOff + 3];
+                }
+            }
+
+            auto tex = new CCTexture2D();
+            if (tex->initWithData(scaledBuf.data(), kCCTexture2DPixelFormat_RGBA8888, outW, outH, CCSize(outW, outH))) {
+                outFrames.push_back(tex);
+                outDelays.push_back(delaySec);
+            }
+            tex->release();
+
+            // Ограничиваем максимум 48 кадров в RAM для стабильности на мобильных устройствах
+            if (outFrames.size() >= 48) break;
+        } else {
+            break;
+        }
+    }
+
+    return !outFrames.empty();
 }
 
 } // namespace
@@ -199,118 +417,95 @@ void ModMenuPopup::updateScreenBlurOpacity() {
     }
 }
 
-// ----- Живой GIF-фон меню с выбором качества (360p / 640p / 1080p) и 30 FPS оптимизацией -----
-void ModMenuPopup::recreateGifBuffer() {
-    if (m_gifSprite) {
-        m_gifSprite->removeFromParent();
-        m_gifSprite = nullptr;
+// ----- Полное заполнение обоев/GIF ровно по форме окна меню со скруглёнными углами! -----
+void ModMenuPopup::updateWallpaperClipMask() {
+    if (!m_wallpaperStencil) return;
+    m_wallpaperStencil->clear();
+    float menuRad = std::clamp(mm::state().menuRadius, 0.f, 28.f);
+    drawRoundRect(m_wallpaperStencil, ccp(1.f, 1.f), CCSize(WIN_W - 2.f, WIN_H - 2.f),
+                  std::max(0.f, menuRad - 1.f), {1.f, 1.f, 1.f, 1.f});
+}
+
+void ModMenuPopup::fitWallpaperSprite(CCTexture2D* tex) {
+    if (!m_wallpaperSprite || !tex) return;
+    m_wallpaperSprite->setTexture(tex);
+    CCSize ts = tex->getContentSize();
+    m_wallpaperSprite->setTextureRect(CCRect(0.f, 0.f, ts.width, ts.height));
+    m_wallpaperSprite->setPosition({WIN_W * 0.5f, WIN_H * 0.5f});
+
+    // Режим Aspect-Fill (Cover): заполняет 100% ширины и высоты меню без чёрных полос!
+    float scaleX = WIN_W / std::max(1.f, ts.width);
+    float scaleY = WIN_H / std::max(1.f, ts.height);
+    float coverScale = std::max(scaleX, scaleY);
+    m_wallpaperSprite->setScale(coverScale);
+}
+
+void ModMenuPopup::reloadCustomWallpaper() {
+    m_gifFrames.clear();
+    m_gifDelays.clear();
+    m_gifCurFrame = 0;
+    m_gifTimer = 0.f;
+
+    std::string const& path = mm::state().customBgPath;
+    m_loadedBgPath = path;
+    m_loadedGifQuality = mm::state().gifQuality;
+
+    if (path.empty() || !std::filesystem::exists(path)) {
+        if (m_wallpaperClip) m_wallpaperClip->setVisible(false);
+        return;
     }
-    if (m_gifRT) {
-        m_gifRT->release();
-        m_gifRT = nullptr;
+
+    // 1. Пробуем декодировать как анимированный .GIF
+    if (decodeGifFile(path, m_loadedGifQuality, m_gifFrames, m_gifDelays)) {
+        if (m_wallpaperSprite && !m_gifFrames.empty()) {
+            this->fitWallpaperSprite(m_gifFrames[0]);
+        }
+        return;
     }
-    if (!m_gifCanvas) {
-        m_gifCanvas = CCDrawNode::create();
-        m_gifCanvas->retain();
-    }
 
-    int q = std::clamp(mm::state().gifQuality, 0, 2);
-    m_createdGifQuality = q;
-
-    // Разрешение текстуры под выбранное качество: 360p (Fast), 640p (Balanced), 1080p (Crisp HD)
-    int texW = (q == 0) ? 180 : (q == 1 ? 320 : 460);
-    int texH = (q == 0) ? 114 : (q == 1 ? 202 : 290);
-
-    m_gifRT = CCRenderTexture::create(texW, texH);
-    if (!m_gifRT) return;
-    m_gifRT->retain();
-
-    if (auto spr = m_gifRT->getSprite()) {
-        if (auto tex = spr->getTexture()) {
-            ccTexParams params = {GL_LINEAR, GL_LINEAR, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE};
-            tex->setTexParameters(&params);
-
-            m_gifSprite = CCSprite::createWithTexture(tex);
-            m_gifSprite->setFlipY(true);
-            m_gifSprite->setPosition({WIN_W * 0.5f, WIN_H * 0.5f});
-            m_gifSprite->setScaleX((WIN_W - 12.f) / static_cast<float>(texW));
-            m_gifSprite->setScaleY((WIN_H - 12.f) / static_cast<float>(texH));
-            m_mainLayer->addChild(m_gifSprite, -8);
+    // 2. Иначе загружаем как обычное изображение (.png / .jpg / .webp)
+    CCTextureCache::sharedTextureCache()->removeTextureForKey(path.c_str());
+    if (auto tex = CCTextureCache::sharedTextureCache()->addImage(path.c_str(), false)) {
+        m_gifFrames.push_back(tex);
+        m_gifDelays.push_back(1.0f);
+        if (m_wallpaperSprite) {
+            this->fitWallpaperSprite(tex);
         }
     }
 }
 
-void ModMenuPopup::updateLiveGif(float dt) {
-    bool gifOn = mm::on(mm::F::LiveGifBg);
-    if (!gifOn) {
-        if (m_gifSprite) m_gifSprite->setVisible(false);
+void ModMenuPopup::updateCustomWallpaper(float dt) {
+    if (!m_wallpaperClip || !m_wallpaperSprite) return;
+
+    bool wpOn = mm::on(mm::F::CustomWallpaper) && !mm::state().customBgPath.empty();
+    if (!wpOn) {
+        m_wallpaperClip->setVisible(false);
         return;
     }
 
-    if (!m_gifRT || !m_gifSprite || m_createdGifQuality != mm::state().gifQuality) {
-        this->recreateGifBuffer();
-    }
-    if (!m_gifRT || !m_gifSprite || !m_gifCanvas) return;
-
-    m_gifSprite->setVisible(true);
-    m_gifSprite->setOpacity(static_cast<GLubyte>(255.f * std::clamp(mm::state().gifOpacity, 0.15f, 1.f)));
-
-    // Оптимизация: обновляем кадр GIF-анимации ровно 30 раз в секунду, чтобы меню вообще не лагало!
-    float realDt = std::clamp(dt / std::max(mm::speed(), 0.25f), 0.002f, 0.05f);
-    m_gifTime += realDt;
-    m_gifFrameAccum += realDt;
-    if (m_gifFrameAccum < (1.f / 30.f)) return;
-    m_gifFrameAccum = 0.f;
-
-    int q = m_createdGifQuality;
-    float tw = (q == 0) ? 180.f : (q == 1 ? 320.f : 460.f);
-    float th = (q == 0) ? 114.f : (q == 1 ? 202.f : 290.f);
-
-    m_gifCanvas->clear();
-    auto acc = mm::accent();
-    int style = mm::state().gifStyle;
-
-    if (style == 0) {
-        // Style 0: Cyber Matrix / Neon Rain
-        drawRoundRect(m_gifCanvas, ccp(0.f, 0.f), CCSize(tw, th), 0.f, P({8, 10, 18}, 0.9f));
-        for (int i = 0; i < 14; i++) {
-            float x = (tw / 14.f) * i + (tw / 28.f);
-            float speed = 35.f + (i % 5) * 14.f;
-            float headY = th - std::fmod(m_gifTime * speed + i * 29.f, th + 40.f);
-            m_gifCanvas->drawSegment(ccp(x, headY), ccp(x, headY + 26.f), 1.8f, P(acc, 0.42f));
-            drawSmoothCircle(m_gifCanvas, ccp(x, headY), 2.2f, P({255, 255, 255}, 0.75f), 12);
-        }
-    } else if (style == 1) {
-        // Style 1: Synthwave Retro Grid
-        drawRoundRect(m_gifCanvas, ccp(0.f, 0.f), CCSize(tw, th), 0.f, P({16, 10, 26}, 0.9f));
-        drawSmoothCircle(m_gifCanvas, ccp(tw * 0.5f, th * 0.62f), th * 0.22f, P({255, 95, 155}, 0.45f), 24);
-        float horizon = th * 0.45f;
-        for (int i = 0; i < 7; i++) {
-            float t = std::fmod(m_gifTime * 0.45f + i / 7.f, 1.f);
-            float y = horizon * (1.f - t * t);
-            m_gifCanvas->drawSegment(ccp(0.f, y), ccp(tw, y), 0.9f, P(acc, 0.45f * t));
-        }
-        for (int i = -5; i <= 5; i++) {
-            m_gifCanvas->drawSegment(ccp(tw * 0.5f + i * 8.f, horizon), ccp(tw * 0.5f + i * 42.f, 0.f), 0.8f, P(acc, 0.35f));
-        }
-    } else {
-        // Style 2: Aurora Plasma Waves
-        drawRoundRect(m_gifCanvas, ccp(0.f, 0.f), CCSize(tw, th), 0.f, P({10, 16, 24}, 0.9f));
-        for (int w = 0; w < 3; w++) {
-            ccColor3B wCol = (w == 0) ? acc : (w == 1 ? ccColor3B{90, 235, 190} : ccColor3B{185, 120, 255});
-            for (int s = 0; s < 16; s++) {
-                float x0 = (tw / 16.f) * s;
-                float x1 = (tw / 16.f) * (s + 1);
-                float y0 = th * (0.35f + 0.15f * w) + std::sin(m_gifTime * 1.8f + s * 0.45f + w) * (th * 0.12f);
-                float y1 = th * (0.35f + 0.15f * w) + std::sin(m_gifTime * 1.8f + (s + 1) * 0.45f + w) * (th * 0.12f);
-                m_gifCanvas->drawSegment(ccp(x0, y0), ccp(x1, y1), 3.2f, P(wCol, 0.36f));
-            }
-        }
+    if (m_loadedBgPath != mm::state().customBgPath || m_loadedGifQuality != mm::state().gifQuality) {
+        this->reloadCustomWallpaper();
     }
 
-    m_gifRT->beginWithClear(0.f, 0.f, 0.f, 0.f);
-    m_gifCanvas->visit();
-    m_gifRT->end();
+    if (m_gifFrames.empty()) {
+        m_wallpaperClip->setVisible(false);
+        return;
+    }
+
+    m_wallpaperClip->setVisible(true);
+    m_wallpaperSprite->setOpacity(static_cast<GLubyte>(255.f * std::clamp(mm::state().gifOpacity, 0.15f, 1.f)));
+
+    // Если это GIF с несколькими кадрами — переключаем кадры по их таймингу
+    if (m_gifFrames.size() > 1) {
+        float realDt = std::clamp(dt / std::max(mm::speed(), 0.25f), 0.002f, 0.05f);
+        m_gifTimer += realDt;
+        float curDelay = m_gifDelays[m_gifCurFrame];
+        if (m_gifTimer >= curDelay) {
+            m_gifTimer -= curDelay;
+            m_gifCurFrame = (m_gifCurFrame + 1) % m_gifFrames.size();
+            this->fitWallpaperSprite(m_gifFrames[m_gifCurFrame]);
+        }
+    }
 }
 
 bool ModMenuPopup::init() {
@@ -343,6 +538,21 @@ bool ModMenuPopup::init() {
     m_bgNode = CCDrawNode::create();
     m_mainLayer->addChild(m_bgNode, -10);
 
+    // Скруглённый контейнер CCClippingNode для пользовательских обоев и GIF на 100% площади меню!
+    m_wallpaperStencil = CCDrawNode::create();
+    m_wallpaperClip = CCClippingNode::create(m_wallpaperStencil);
+    m_wallpaperClip->setAlphaThreshold(0.05f);
+    m_wallpaperClip->setPosition({0.f, 0.f});
+    m_wallpaperClip->setVisible(false);
+
+    m_wallpaperSprite = CCSprite::create();
+    m_wallpaperSprite->setPosition({WIN_W * 0.5f, WIN_H * 0.5f});
+    m_wallpaperClip->addChild(m_wallpaperSprite, 1);
+    m_mainLayer->addChild(m_wallpaperClip, -8);
+
+    this->updateWallpaperClipMask();
+    this->reloadCustomWallpaper();
+
     m_particleNode = CCDrawNode::create();
     m_mainLayer->addChild(m_particleNode, -5);
 
@@ -358,7 +568,7 @@ bool ModMenuPopup::init() {
     brandLbl->setPosition({38.f, WIN_H - 21.f});
     m_mainLayer->addChild(brandLbl, 5);
 
-    // ----- ОСНОВНАЯ ИКОНКА ИГРОКА ИЗ ГАРАЖА GD (вместо серого кружка "?") + НИК ИГРОКА -----
+    // Основная иконка игрока из гаража GD + Ник игрока
     {
         auto gm = GameManager::get();
         std::string playerName = (gm && !gm->m_playerName.empty()) ? std::string(gm->m_playerName) : "Player";
@@ -367,7 +577,6 @@ bool ModMenuPopup::init() {
         auto pNode = CCNode::create();
         pNode->setContentSize({145.f, 26.f});
 
-        // Создаём настоящий SimplePlayer с цветами и свечением игрока из профиля!
         auto playerIcon = SimplePlayer::create(cubeFrame);
         if (playerIcon && gm) {
             playerIcon->setColor(gm->colorForIdx(gm->getPlayerColor()));
@@ -388,6 +597,7 @@ bool ModMenuPopup::init() {
         pNode->addChild(uName, 2);
 
         auto qBtn = CCMenuItemSpriteExtra::create(pNode, this, menu_selector(ModMenuPopup::onModInfo));
+        qBtn->m_scaleMultiplier = 1.04f;
         qBtn->setPosition({215.f, WIN_H - 21.f});
         m_buttonMenu->addChild(qBtn, 15);
     }
@@ -407,7 +617,7 @@ bool ModMenuPopup::init() {
         m_buttonMenu->addChild(cBtn, 15);
     }
 
-    // ----- НИЖНЯЯ ДОК-ПАНЕЛЬ ВКЛАДОК (Bottom Navigation Bar) -----
+    // ----- НИЖНЯЯ ДОК-ПАНЕЛЬ ВКЛАДОК -----
     m_tabSlider = CCDrawNode::create();
     m_tabSlider->setPosition({tabX(0), DOCK_Y});
     m_mainLayer->addChild(m_tabSlider, 4);
@@ -436,6 +646,7 @@ bool ModMenuPopup::init() {
         m_tabLabels[i] = bLbl;
 
         auto btn = CCMenuItemSpriteExtra::create(bNode, this, menu_selector(ModMenuPopup::onTab));
+        btn->m_scaleMultiplier = 1.05f;
         btn->setTag(i);
         btn->setPosition({tabX(i), DOCK_Y});
         bottomMenu->addChild(btn);
@@ -461,14 +672,7 @@ bool ModMenuPopup::init() {
 void ModMenuPopup::onExit() {
     mm::state().menuOpen = false;
     mm::saveAll();
-    if (m_gifRT) {
-        m_gifRT->release();
-        m_gifRT = nullptr;
-    }
-    if (m_gifCanvas) {
-        m_gifCanvas->release();
-        m_gifCanvas = nullptr;
-    }
+    m_gifFrames.clear();
     Popup::onExit();
 }
 
@@ -488,8 +692,8 @@ void ModMenuPopup::initParticles() {
 }
 
 void ModMenuPopup::update(float dt) {
-    // 1. Обновляем оптимизированный GIF-фон (если включён)
-    this->updateLiveGif(dt);
+    // 1. Обновляем импортированные обои / GIF
+    this->updateCustomWallpaper(dt);
 
     // 2. Обновляем партиклы меню
     m_particleNode->clear();
@@ -511,7 +715,6 @@ void ModMenuPopup::update(float dt) {
         if (p.pos.x > WIN_W - 12.f) p.pos.x = 14.f;
 
         if (pType == 1) {
-            // Идеально круглые снежинки (28 сегментов вместо 8) + мягкий ореол!
             drawSmoothCircle(m_particleNode, p.pos, p.size * 1.25f, P({240, 248, 255}, p.alpha * 0.28f), 20);
             drawSmoothCircle(m_particleNode, p.pos, p.size * 0.78f, P({255, 255, 255}, p.alpha), 28);
         } else if (pType == 2) {
@@ -554,9 +757,10 @@ void ModMenuPopup::redrawFrame() {
 
     m_bgNode->drawSegment(ccp(14.f, WIN_H - 38.f), ccp(WIN_W - 14.f, WIN_H - 38.f), 0.5f, P({255, 255, 255}, 0.08f));
 
-    // Парящая нижняя док-панель вкладок (y = 7..39)
     float dockRad = std::min(12.f, menuRad * 0.6f + 2.f);
     drawLoonGlass(m_bgNode, ccp(20.f, 7.f), CCSize(WIN_W - 40.f, 32.f), dockRad, card, 0.92f, {255, 255, 255}, 0.12f);
+
+    this->updateWallpaperClipMask();
 }
 
 void ModMenuPopup::redrawTabSlider() {
@@ -590,7 +794,6 @@ void ModMenuPopup::redrawLButtonPreview() {
     drawRoundRect(m_previewBtnBg, ccp(1.f, 1.f), CCSize(36.f, 36.f), rad,
                   P({12, 12, 18}, a), 1.2f, P(acc, a));
     m_previewBtnLbl->setOpacity(static_cast<GLubyte>(255.f * a));
-    // Ограничиваем визуальный масштаб внутри рамки превью, чтобы кнопка никогда не вылезала за пределы бокса
     m_previewBtnRoot->setScale(std::clamp(mm::state().btnScale * 0.85f, 0.50f, 1.25f));
 }
 
@@ -649,11 +852,11 @@ void ModMenuPopup::addModuleRow(float x, float yRowTop, float w, mm::F flag, boo
     ccColor3B swCol = enabled ? (risky ? CHEAT_RED : slCol) : ccColor3B{40, 43, 55};
     drawRoundRect(swDraw, ccp(2.f, 2.f), CCSize(22.f, 10.f), 5.f, P(swCol, 1.f));
     float knobX = enabled ? 19.f : 7.f;
-    // Идеально круглый тумблер (32 сегмента)
     drawSmoothCircle(swDraw, ccp(knobX, 7.f), 3.8f, P(enabled ? ccColor3B{255, 255, 255} : ccColor3B{130, 136, 152}, 1.f), 32);
     swNode->addChild(swDraw);
 
     auto swBtn = CCMenuItemSpriteExtra::create(swNode, this, menu_selector(ModMenuPopup::onToggle));
+    swBtn->m_scaleMultiplier = 1.05f;
     swBtn->setTag(static_cast<int>(flag));
     swBtn->setPosition({x + w - 18.f, cy});
     m_mainCardsMenu->addChild(swBtn);
@@ -668,6 +871,7 @@ void ModMenuPopup::addModuleRow(float x, float yRowTop, float w, mm::F flag, boo
         dotsNode->addChild(dotsDraw);
 
         auto dotsBtn = CCMenuItemSpriteExtra::create(dotsNode, this, menu_selector(ModMenuPopup::onOpenSub));
+        dotsBtn->m_scaleMultiplier = 1.08f;
         dotsBtn->setTag(static_cast<int>(flag));
         dotsBtn->setPosition({x + w - 42.f, cy});
         m_mainCardsMenu->addChild(dotsBtn);
@@ -718,7 +922,6 @@ void ModMenuPopup::refreshSliderVisual(SliderTrack& sl) {
         drawRoundRect(sl.drawNode, ccp(x, y - 2.2f), CCSize(std::max(4.4f, w * t), 4.4f), 2.2f, P(barCol, 1.f));
     }
     float kx = x + w * t;
-    // Идеально круглые ручки ползунков (32 сегмента!)
     if (mm::on(mm::F::Glow)) {
         drawSmoothCircle(sl.drawNode, ccp(kx, y), 7.2f, P({255, 255, 255}, 0.25f * mm::state().glowIntensity), 28);
     }
@@ -731,10 +934,10 @@ void ModMenuPopup::refreshSliderVisual(SliderTrack& sl) {
 
 void ModMenuPopup::buildVisualPalette(CCNode* host, float x, float y) {
     m_hasPalette = true;
-    float svW = 240.f, svH = 60.f;
-    float hueH = 10.f;
+    float svW = 240.f, svH = 82.f;
+    float hueH = 12.f;
 
-    m_svRect = CCRect(x, y + 15.f, svW, svH);
+    m_svRect = CCRect(x, y + 18.f, svW, svH);
     m_hueRect = CCRect(x, y, svW, hueH);
 
     int sl = mm::state().editSlot;
@@ -806,14 +1009,14 @@ void ModMenuPopup::animatePress(CCNode* target) {
     target->setScale(1.f);
     if (type == 1) {
         target->runAction(CCSequence::create(
-            CCEaseSineOut::create(CCScaleTo::create(0.06f, pwr)),
-            CCEaseBackOut::create(CCScaleTo::create(0.15f, 1.0f)),
+            CCEaseSineOut::create(CCScaleTo::create(0.05f, pwr)),
+            CCEaseBackOut::create(CCScaleTo::create(0.12f, 1.0f)),
             nullptr
         ));
     } else {
         target->runAction(CCSequence::create(
-            CCScaleTo::create(0.05f, pwr),
-            CCEaseExponentialOut::create(CCScaleTo::create(0.13f, 1.0f)),
+            CCScaleTo::create(0.04f, pwr),
+            CCEaseExponentialOut::create(CCScaleTo::create(0.11f, 1.0f)),
             nullptr
         ));
     }
@@ -851,7 +1054,6 @@ void ModMenuPopup::rebuildContent(bool animateTransition) {
     float topY = WIN_H - 45.f;
 
     if (m_currentTab == 0) {
-        // PLAYER
         this->drawSectionBox(m_contentHost, col0X, topY, boxW, 2, "Movement");
         this->addModuleRow(col0X, topY - 22.f, boxW, mm::F::Noclip, false, true);
         this->addModuleRow(col0X, topY - 48.f, boxW, mm::F::Jump, false, false);
@@ -878,13 +1080,13 @@ void ModMenuPopup::rebuildContent(bool animateTransition) {
             pNode->addChild(pLbl);
 
             auto btn = CCMenuItemSpriteExtra::create(pNode, this, menu_selector(ModMenuPopup::onSpeedPill));
+            btn->m_scaleMultiplier = 1.04f;
             btn->setTag(i);
             btn->setPosition({col0X + 42.f + i * 68.f, spTop - 48.f});
             m_mainCardsMenu->addChild(btn);
         }
     }
     else if (m_currentTab == 1) {
-        // LEVEL
         this->drawSectionBox(m_contentHost, col0X, topY, boxW, 3, "Level & Bypass");
         this->addModuleRow(col0X, topY - 22.f, boxW, mm::F::TpsBypass, false, true);
         this->addModuleRow(col0X, topY - 48.f, boxW, mm::F::Hitboxes, false, true);
@@ -912,7 +1114,6 @@ void ModMenuPopup::rebuildContent(bool animateTransition) {
         m_contentHost->addChild(input, 15);
     }
     else if (m_currentTab == 2) {
-        // VISUALS
         this->drawSectionBox(m_contentHost, col0X, topY, boxW, 4, "Interface");
         this->addModuleRow(col0X, topY - 22.f, boxW, mm::F::Overlay, true, true);
         this->addModuleRow(col0X, topY - 48.f, boxW, mm::F::ShowFPS, false, true);
@@ -927,21 +1128,22 @@ void ModMenuPopup::rebuildContent(bool animateTransition) {
         this->addModuleRow(col1X, topY - 126.f, boxW, mm::F::RainbowBG, false, false);
     }
     else if (m_currentTab == 3) {
-        // THEMES (Loon Glass + Screen Blur + Live GIF BG с выбором качества 360p/640p/1080p!)
+        // THEMES: Loon Glass + Screen Blur + Импорт своих обоев/GIF!
         this->drawSectionBox(m_contentHost, col0X, topY, boxW, 2, "Loon Surface");
         this->addModuleRow(col0X, topY - 22.f, boxW, mm::F::LiquidGlass, true, true);
         this->addModuleRow(col0X, topY - 48.f, boxW, mm::F::BgBlur, true, false);
 
-        this->drawSectionBox(m_contentHost, col1X, topY, boxW, 2, "Animated & Bloom");
+        this->drawSectionBox(m_contentHost, col1X, topY, boxW, 2, "Wallpaper & Bloom");
         this->addModuleRow(col1X, topY - 22.f, boxW, mm::F::Glow, true, true);
-        this->addModuleRow(col1X, topY - 48.f, boxW, mm::F::LiveGifBg, true, false); // "..." открывает настройку 360p/640p/1080p!
+        this->addModuleRow(col1X, topY - 48.f, boxW, mm::F::CustomWallpaper, true, false); // "..." открывает импорт своих фото и GIF!
 
+        // Кнопки выбора тем с ОТКЛЮЧЁННЫМ раздуванием (m_scaleMultiplier = 1.0f), чтобы никогда не налезали друг на друга!
         for (int i = 0; i < 8; i++) {
             int col = i % 2;
             int row = i / 2;
             float cardW = boxW, cardH = 24.f;
             float x = (col == 0 ? col0X : col1X);
-            float y = topY - 106.f - row * (cardH + 4.f);
+            float y = topY - 106.f - row * (cardH + 5.f);
 
             bool sel = (mm::state().themeIdx == i);
             auto node = CCNode::create();
@@ -951,7 +1153,8 @@ void ModMenuPopup::rebuildContent(bool animateTransition) {
                           mm::THEMES[i].card, 0.94f,
                           sel ? acc : ccColor3B{255, 255, 255}, sel ? 0.90f : 0.10f);
 
-            ccColor3B swCol = (i == 7) ? mm::accent() : mm::THEMES[i].accent;
+            ccColor3B swCol = (i == 7) ? mm::hsv(mm::state().customH[0], mm::state().customS[0], mm::state().customV[0])
+                                       : mm::THEMES[i].accent;
             drawRoundRect(d, ccp(cardW - 30.f, 3.f), CCSize(22.f, 18.f), 4.f, P(swCol, 1.f));
             node->addChild(d);
 
@@ -963,18 +1166,18 @@ void ModMenuPopup::rebuildContent(bool animateTransition) {
             node->addChild(lbl);
 
             auto btn = CCMenuItemSpriteExtra::create(node, this, menu_selector(ModMenuPopup::onThemeSelect));
+            btn->m_scaleMultiplier = 1.0f; // НЕ увеличивается и НЕ вылезает за соседние кнопки!
             btn->setTag(i);
             btn->setPosition({x + cardW * 0.5f, y + cardH * 0.5f});
             m_mainCardsMenu->addChild(btn);
         }
     }
     else if (m_currentTab == 4) {
-        // CLIENT — ИСПРАВЛЕНА ГЕОМЕТРИЯ: Live Button Preview больше НЕ вылезает на нижнюю панель вкладок!
+        // CLIENT
         this->drawSectionBox(m_contentHost, col0X, topY, boxW, 2, "L-Button Visibility");
         this->addModuleRow(col0X, topY - 22.f, boxW, mm::F::BtnHideInGame, false, true);
         this->addModuleRow(col0X, topY - 48.f, boxW, mm::F::BtnShowInPause, false, false);
 
-        // Компактный блок ползунков (3 строки = высота 104px, заканчивается на y = 141)
         this->drawSectionBox(m_contentHost, col1X, topY, boxW, 3, "L-Button Sliders");
         this->addSliderControl(m_contentHost, col1X + 10.f, topY - 38.f, boxW - 20.f,
                                "Button Size", "%", 55.f, 150.f, true,
@@ -1000,9 +1203,7 @@ void ModMenuPopup::rebuildContent(bool animateTransition) {
                                    this->redrawLButtonPreview();
                                });
 
-        // Нижние блоки ("Menu Particles" слева и "Live Button Preview" справа) стоят строго на одной высоте (yTop = 128, yBot = 50),
-        // заканчиваясь на 11 пикселей ВЫШЕ нижней панели вкладок!
-        float botTop = topY - 117.f; // 245 - 117 = 128.f
+        float botTop = topY - 117.f;
         this->drawSectionBox(m_contentHost, col0X, botTop, boxW, 2, "Menu Particles");
         char const* pNames[4] = {"Off", "Win", "Aut", "Sak"};
         for (int i = 0; i < 4; i++) {
@@ -1018,6 +1219,7 @@ void ModMenuPopup::rebuildContent(bool animateTransition) {
             l->setColor(sel ? ccColor3B{255, 255, 255} : txtCol);
             n->addChild(l);
             auto b = CCMenuItemSpriteExtra::create(n, this, menu_selector(ModMenuPopup::onParticleSelect));
+            b->m_scaleMultiplier = 1.04f;
             b->setTag(i);
             b->setPosition({col0X + 30.f + i * 48.f, botTop - 48.f});
             m_mainCardsMenu->addChild(b);
@@ -1084,24 +1286,63 @@ void ModMenuPopup::rebuildSubPopup(bool animateOpen) {
     backLbl->setPosition({28.f, 11.f});
     backNode->addChild(backLbl);
     auto backBtn = CCMenuItemSpriteExtra::create(backNode, this, menu_selector(ModMenuPopup::onCloseSub));
+    backBtn->m_scaleMultiplier = 1.04f;
     backBtn->setPosition({52.f, WIN_H - 58.f});
     subMenu->addChild(backBtn);
 
-    if (m_activeSubFeature == mm::F::LiveGifBg) {
-        // Меню настройки живой GIF-анимации (Качество 360p / 640p / 1080p, Стиль, Прозрачность)
-        auto hdr = CCLabelBMFont::create("Live Animated Wallpaper (30 FPS Optimized)", "chatFont.fnt");
+    if (m_activeSubFeature == mm::F::CustomWallpaper) {
+        // Меню импорта своих изображений (.png / .jpg) и своих GIF (.gif) на весь фон меню!
+        auto hdr = CCLabelBMFont::create("Custom Wallpaper & GIF Importer", "chatFont.fnt");
         hdr->setScale(0.75f);
         hdr->setColor(acc);
         hdr->setPosition({WIN_W * 0.5f + 20.f, WIN_H - 58.f});
         m_subPopupHost->addChild(hdr, 2);
 
-        auto qTitle = CCLabelBMFont::create("Render Quality (Resolution):", "chatFont.fnt");
-        qTitle->setScale(0.66f);
+        // Кнопка "Import Image / GIF"
+        {
+            auto impNode = CCNode::create();
+            impNode->setContentSize({185.f, 28.f});
+            auto impDraw = CCDrawNode::create();
+            drawLoonGlass(impDraw, ccp(0.f, 0.f), CCSize(185.f, 28.f), 7.f, slCol, 0.96f, acc, 0.9f);
+            impNode->addChild(impDraw);
+            auto impLbl = CCLabelBMFont::create("Import Image / GIF...", "chatFont.fnt");
+            impLbl->setScale(0.68f);
+            impLbl->setPosition({92.5f, 14.f});
+            impNode->addChild(impLbl);
+
+            auto impBtn = CCMenuItemSpriteExtra::create(impNode, this, menu_selector(ModMenuPopup::onImportWallpaper));
+            impBtn->m_scaleMultiplier = 1.03f;
+            impBtn->setPosition({132.f, 190.f});
+            subMenu->addChild(impBtn);
+        }
+
+        // Кнопка "Clear Wallpaper"
+        {
+            auto clrNode = CCNode::create();
+            clrNode->setContentSize({165.f, 28.f});
+            auto clrDraw = CCDrawNode::create();
+            drawLoonGlass(clrDraw, ccp(0.f, 0.f), CCSize(165.f, 28.f), 7.f, mm::themeCard(), 0.96f, CHEAT_RED, 0.7f);
+            clrNode->addChild(clrDraw);
+            auto clrLbl = CCLabelBMFont::create("Clear Wallpaper", "chatFont.fnt");
+            clrLbl->setScale(0.68f);
+            clrLbl->setColor(CHEAT_RED_ON);
+            clrLbl->setPosition({82.5f, 14.f});
+            clrNode->addChild(clrLbl);
+
+            auto clrBtn = CCMenuItemSpriteExtra::create(clrNode, this, menu_selector(ModMenuPopup::onClearWallpaper));
+            clrBtn->m_scaleMultiplier = 1.03f;
+            clrBtn->setPosition({332.f, 190.f});
+            subMenu->addChild(clrBtn);
+        }
+
+        // Выбор качества GIF (360p / 640p / 1080p) для отсутствия лагов
+        auto qTitle = CCLabelBMFont::create("GIF Decode Quality (Optimization):", "chatFont.fnt");
+        qTitle->setScale(0.64f);
         qTitle->setAnchorPoint({0.f, 0.5f});
-        qTitle->setPosition({34.f, 195.f});
+        qTitle->setPosition({34.f, 152.f});
         m_subPopupHost->addChild(qTitle, 2);
 
-        char const* qNames[3] = {"360p (Fast)", "640p (Balanced)", "1080p (Crisp HD)"};
+        char const* qNames[3] = {"360p (Fast)", "640p (Balanced)", "1080p (Original)"};
         for (int i = 0; i < 3; i++) {
             bool sel = (mm::state().gifQuality == i);
             auto n = CCNode::create();
@@ -1115,38 +1356,14 @@ void ModMenuPopup::rebuildSubPopup(bool animateOpen) {
             lb->setColor(sel ? ccColor3B{255, 255, 255} : txtCol);
             n->addChild(lb);
             auto b = CCMenuItemSpriteExtra::create(n, this, menu_selector(ModMenuPopup::onGifQualitySelect));
+            b->m_scaleMultiplier = 1.03f;
             b->setTag(i);
-            b->setPosition({95.f + i * 134.f, 170.f});
+            b->setPosition({95.f + i * 134.f, 126.f});
             subMenu->addChild(b);
         }
 
-        auto sTitle = CCLabelBMFont::create("Animation Preset:", "chatFont.fnt");
-        sTitle->setScale(0.66f);
-        sTitle->setAnchorPoint({0.f, 0.5f});
-        sTitle->setPosition({34.f, 138.f});
-        m_subPopupHost->addChild(sTitle, 2);
-
-        char const* sNames[3] = {"Cyber Matrix", "Synthwave Grid", "Aurora Waves"};
-        for (int i = 0; i < 3; i++) {
-            bool sel = (mm::state().gifStyle == i);
-            auto n = CCNode::create();
-            n->setContentSize({122.f, 24.f});
-            auto dr = CCDrawNode::create();
-            drawLoonGlass(dr, ccp(0.f, 0.f), CCSize(122.f, 24.f), 6.f, sel ? slCol : mm::themeCard(), 0.96f);
-            n->addChild(dr);
-            auto lb = CCLabelBMFont::create(sNames[i], "chatFont.fnt");
-            lb->setScale(0.62f);
-            lb->setPosition({61.f, 12.f});
-            lb->setColor(sel ? ccColor3B{255, 255, 255} : txtCol);
-            n->addChild(lb);
-            auto b = CCMenuItemSpriteExtra::create(n, this, menu_selector(ModMenuPopup::onGifStyleSelect));
-            b->setTag(i);
-            b->setPosition({95.f + i * 134.f, 114.f});
-            subMenu->addChild(b);
-        }
-
-        this->addSliderControl(m_subPopupHost, 34.f, 68.f, 392.f,
-                               "Live GIF Opacity", "%", 15.f, 100.f, true,
+        this->addSliderControl(m_subPopupHost, 34.f, 74.f, 392.f,
+                               "Wallpaper / GIF Opacity", "%", 15.f, 100.f, true,
                                [] { return mm::state().gifOpacity * 100.f; },
                                [](float v) { mm::state().gifOpacity = v / 100.f; });
     }
@@ -1174,6 +1391,7 @@ void ModMenuPopup::rebuildSubPopup(bool animateOpen) {
             n->addChild(lb);
 
             auto b = CCMenuItemSpriteExtra::create(n, this, menu_selector(ModMenuPopup::onToggle));
+            b->m_scaleMultiplier = 1.03f;
             b->setTag(static_cast<int>(ovFlags[i]));
             b->setPosition({bx + 61.f, by + 12.f});
             subMenu->addChild(b);
@@ -1203,21 +1421,29 @@ void ModMenuPopup::rebuildSubPopup(bool animateOpen) {
             lb->setColor(sel ? ccColor3B{255, 255, 255} : txtCol);
             n->addChild(lb);
             auto b = CCMenuItemSpriteExtra::create(n, this, menu_selector(ModMenuPopup::onOvCornerSelect));
+            b->m_scaleMultiplier = 1.03f;
             b->setTag(i);
             b->setPosition({78.f + i * 100.f, 66.f});
             subMenu->addChild(b);
         }
     }
-    else if (m_activeSubFeature == mm::F::Glow || m_activeSubFeature == mm::F::LiquidGlass || m_activeSubFeature == mm::F::BgBlur) {
-        this->addSliderControl(m_subPopupHost, 32.f, 200.f, 185.f,
-                               "Screen Blur", "%", 0.f, 100.f, true,
+    else if (m_activeSubFeature == mm::F::LiquidGlass || m_activeSubFeature == mm::F::BgBlur) {
+        // Настройки Loon Glass / Screen Blur / Menu Corners (БЕЗ палитры, чтобы случайно не сбивать тему на Custom Palette!)
+        auto hdr = CCLabelBMFont::create("Loon Surface & Blur Settings", "chatFont.fnt");
+        hdr->setScale(0.76f);
+        hdr->setColor(acc);
+        hdr->setPosition({WIN_W * 0.5f + 20.f, WIN_H - 58.f});
+        m_subPopupHost->addChild(hdr, 2);
+
+        this->addSliderControl(m_subPopupHost, 40.f, 182.f, 380.f,
+                               "Screen Blur Strength", "%", 0.f, 100.f, true,
                                [] { return mm::state().bgBlurStrength * 100.f; },
                                [this](float v) {
                                    mm::state().bgBlurStrength = v / 100.f;
                                    this->updateScreenBlurOpacity();
                                });
 
-        this->addSliderControl(m_subPopupHost, 242.f, 200.f, 185.f,
+        this->addSliderControl(m_subPopupHost, 40.f, 138.f, 380.f,
                                "Glass Opacity", "%", 40.f, 96.f, true,
                                [] { return mm::state().glassAlpha * 100.f; },
                                [this](float v) {
@@ -1225,8 +1451,18 @@ void ModMenuPopup::rebuildSubPopup(bool animateOpen) {
                                    this->redrawFrame();
                                });
 
-        this->addSliderControl(m_subPopupHost, 32.f, 166.f, 185.f,
-                               "White Glow", "%", 0.f, 100.f, true,
+        this->addSliderControl(m_subPopupHost, 40.f, 94.f, 380.f,
+                               "Menu Corner Radius", " px", 0.f, 28.f, true,
+                               [] { return mm::state().menuRadius; },
+                               [this](float v) {
+                                   mm::state().menuRadius = v;
+                                   this->redrawFrame();
+                               });
+    }
+    else if (m_activeSubFeature == mm::F::Glow) {
+        // Если нажали "..." на White Glow ИЛИ выбрали тему "Custom Palette":
+        this->addSliderControl(m_subPopupHost, 32.f, 198.f, 396.f,
+                               "White Glow Intensity", "%", 0.f, 100.f, true,
                                [] { return mm::state().glowIntensity * 100.f; },
                                [this](float v) {
                                    mm::state().glowIntensity = v / 100.f;
@@ -1234,30 +1470,23 @@ void ModMenuPopup::rebuildSubPopup(bool animateOpen) {
                                    this->redrawTabSlider();
                                });
 
-        this->addSliderControl(m_subPopupHost, 242.f, 166.f, 185.f,
-                               "Menu Corners", " px", 0.f, 28.f, true,
-                               [] { return mm::state().menuRadius; },
-                               [this](float v) {
-                                   mm::state().menuRadius = v;
-                                   this->redrawFrame();
-                               });
-
         char const* slots[3] = {"Accent Color", "Background", "Containers"};
         for (int i = 0; i < 3; i++) {
             bool sel = (mm::state().editSlot == i);
             auto n = CCNode::create();
-            n->setContentSize({116.f, 22.f});
+            n->setContentSize({116.f, 24.f});
             auto dr = CCDrawNode::create();
-            drawLoonGlass(dr, ccp(0.f, 0.f), CCSize(116.f, 22.f), 6.f, sel ? slCol : mm::themeCard(), 0.96f);
+            drawLoonGlass(dr, ccp(0.f, 0.f), CCSize(116.f, 24.f), 6.f, sel ? slCol : mm::themeCard(), 0.96f);
             n->addChild(dr);
             auto lb = CCLabelBMFont::create(slots[i], "chatFont.fnt");
             lb->setScale(0.62f);
-            lb->setPosition({58.f, 11.f});
+            lb->setPosition({58.f, 12.f});
             lb->setColor(sel ? ccColor3B{255, 255, 255} : txtCol);
             n->addChild(lb);
             auto b = CCMenuItemSpriteExtra::create(n, this, menu_selector(ModMenuPopup::onColorSlotSelect));
+            b->m_scaleMultiplier = 1.03f;
             b->setTag(i);
-            b->setPosition({358.f, 122.f - i * 28.f});
+            b->setPosition({358.f, 134.f - i * 32.f});
             subMenu->addChild(b);
         }
 
@@ -1416,9 +1645,8 @@ void ModMenuPopup::onModInfo(CCObject* sender) {
     FLAlertLayer::create(
         "About Loon Client",
         "<cy>Loon Client</c> — Modern Frosted Glass Menu for GD 2.2081.\n"
-        "<cg>Player Profile:</c> Shows your active GD cube icon & colors in the header.\n"
-        "<cg>Live GIF BG:</c> Animated background with 360p, 640p & 1080p quality modes.\n"
-        "<cg>30 FPS Render Cache:</c> Zero lag on mobile devices!",
+        "<cg>Wallpaper & GIF Importer:</c> Import any .png, .jpg or animated .gif to fill the entire menu background!\n"
+        "<cg>Quality Modes:</c> Choose 360p, 640p or 1080p for zero lag.",
         "Got It"
     )->show();
 }
@@ -1446,7 +1674,7 @@ void ModMenuPopup::onThemeSelect(CCObject* sender) {
     mm::state().themeIdx = idx;
     mm::saveAll();
     if (idx == 7) {
-        m_activeSubFeature = mm::F::LiquidGlass;
+        m_activeSubFeature = mm::F::Glow;
         m_hasSubSettings = true;
         this->rebuildContent(false);
         this->rebuildSubPopup(true);
@@ -1470,12 +1698,45 @@ void ModMenuPopup::onColorSlotSelect(CCObject* sender) {
 void ModMenuPopup::onGifQualitySelect(CCObject* sender) {
     mm::state().gifQuality = static_cast<CCNode*>(sender)->getTag();
     mm::saveAll();
-    this->recreateGifBuffer();
+    this->reloadCustomWallpaper();
     this->rebuildSubPopup(false);
 }
 
-void ModMenuPopup::onGifStyleSelect(CCObject* sender) {
-    mm::state().gifStyle = static_cast<CCNode*>(sender)->getTag();
+// Импорт своей картинки (.png / .jpg) или анимации (.gif) через системный проводник Android!
+void ModMenuPopup::onImportWallpaper(CCObject*) {
+    file::FilePickOptions opts;
+    opts.filters.push_back({"Images & GIFs", {"*.gif", "*.png", "*.jpg", "*.jpeg"}});
+
+    async::spawn(
+        file::pick(file::PickMode::OpenFile, opts),
+        [self = Ref<ModMenuPopup>(this)](Result<std::optional<std::filesystem::path>> res) {
+            if (!res.isOk()) return;
+            auto optPath = res.unwrap();
+            if (!optPath.has_value()) return;
+
+            std::string chosen = optPath.value().string();
+            if (chosen.empty()) return;
+
+            mm::state().customBgPath = chosen;
+            mm::set(mm::F::CustomWallpaper, true);
+            mm::save(mm::F::CustomWallpaper);
+            mm::saveAll();
+
+            if (self) {
+                self->reloadCustomWallpaper();
+                self-> redrawFrame();
+                self->rebuildSubPopup(false);
+            }
+        }
+    );
+}
+
+void ModMenuPopup::onClearWallpaper(CCObject*) {
+    mm::state().customBgPath.clear();
+    mm::set(mm::F::CustomWallpaper, false);
+    mm::save(mm::F::CustomWallpaper);
     mm::saveAll();
+    this->reloadCustomWallpaper();
+    this->redrawFrame();
     this->rebuildSubPopup(false);
 }
