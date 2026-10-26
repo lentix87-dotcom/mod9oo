@@ -1,6 +1,7 @@
 #pragma once
 #include <Geode/Geode.hpp>
 #include <Geode/ui/TextInput.hpp>
+#include <Geode/utils/file.hpp>
 #include <array>
 #include <functional>
 #include <vector>
@@ -54,20 +55,23 @@ protected:
     CCNode* m_subPopupHost = nullptr;
     CCMenu* m_mainCardsMenu = nullptr;
 
-    // Живой GIF / Анимированный фон меню с поддержкой выбора качества (360p / 640p / 1080p)
-    CCRenderTexture* m_gifRT = nullptr;
-    CCSprite* m_gifSprite = nullptr;
-    CCDrawNode* m_gifCanvas = nullptr;
-    float m_gifTime = 0.f;
-    float m_gifFrameAccum = 0.f;
-    int m_createdGifQuality = -1;
+    // Импортированные обои (PNG / JPG / Анимированный GIF) на 100% окна со скруглением!
+    CCClippingNode* m_wallpaperClip = nullptr;
+    CCDrawNode* m_wallpaperStencil = nullptr;
+    CCSprite* m_wallpaperSprite = nullptr;
+    std::vector<Ref<CCTexture2D>> m_gifFrames;
+    std::vector<float> m_gifDelays;
+    size_t m_gifCurFrame = 0;
+    float m_gifTimer = 0.f;
+    std::string m_loadedBgPath;
+    int m_loadedGifQuality = -1;
 
     // Живое превью кнопки L
     CCNode* m_previewBtnRoot = nullptr;
     CCDrawNode* m_previewBtnBg = nullptr;
     CCLabelBMFont* m_previewBtnLbl = nullptr;
 
-    // Визуальная палитра
+    // Визуальная палитра (открывается ТОЛЬКО для Custom Palette)
     bool m_hasPalette = false;
     CCRect m_svRect;
     CCRect m_hueRect;
@@ -91,9 +95,11 @@ protected:
     void createScreenBlur();
     void updateScreenBlurOpacity();
 
-    // Живой GIF-фон с настройкой качества (360p / 640p / 1080p) и оптимизацией 30 FPS
-    void recreateGifBuffer();
-    void updateLiveGif(float dt);
+    // Загрузка и отрисовка пользовательских обоев и GIF на 100% окна меню
+    void reloadCustomWallpaper();
+    void fitWallpaperSprite(CCTexture2D* tex);
+    void updateWallpaperClipMask();
+    void updateCustomWallpaper(float dt);
 
     // Отрисовка Loon Client
     void redrawFrame();
@@ -132,7 +138,8 @@ protected:
     void onOvCornerSelect(CCObject* sender);
     void onColorSlotSelect(CCObject* sender);
     void onGifQualitySelect(CCObject* sender);
-    void onGifStyleSelect(CCObject* sender);
+    void onImportWallpaper(CCObject* sender);
+    void onClearWallpaper(CCObject* sender);
 
 public:
     static ModMenuPopup* create();
