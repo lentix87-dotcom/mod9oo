@@ -40,7 +40,7 @@ protected:
     bool m_hasSubSettings = false;
     mm::F m_activeSubFeature = mm::F::COUNT;
 
-    // Полноценный многослойный Screen Blur без зума!
+    // Многослойный Screen Blur
     CCNode* m_screenBlurHost = nullptr;
     std::vector<CCSprite*> m_blurPasses;
     CCDrawNode* m_blurFrostOverlay = nullptr;
@@ -53,6 +53,14 @@ protected:
     CCNode* m_contentHost = nullptr;
     CCNode* m_subPopupHost = nullptr;
     CCMenu* m_mainCardsMenu = nullptr;
+
+    // Живой GIF / Анимированный фон меню с поддержкой выбора качества (360p / 640p / 1080p)
+    CCRenderTexture* m_gifRT = nullptr;
+    CCSprite* m_gifSprite = nullptr;
+    CCDrawNode* m_gifCanvas = nullptr;
+    float m_gifTime = 0.f;
+    float m_gifFrameAccum = 0.f;
+    int m_createdGifQuality = -1;
 
     // Живое превью кнопки L
     CCNode* m_previewBtnRoot = nullptr;
@@ -79,9 +87,13 @@ protected:
     void onExit() override;
     void update(float dt) override;
 
-    // Настоящее размытие экрана (Kawase Multi-Pass Blur)
+    // Screen Blur
     void createScreenBlur();
     void updateScreenBlurOpacity();
+
+    // Живой GIF-фон с настройкой качества (360p / 640p / 1080p) и оптимизацией 30 FPS
+    void recreateGifBuffer();
+    void updateLiveGif(float dt);
 
     // Отрисовка Loon Client
     void redrawFrame();
@@ -119,6 +131,8 @@ protected:
     void onThemeSelect(CCObject* sender);
     void onOvCornerSelect(CCObject* sender);
     void onColorSlotSelect(CCObject* sender);
+    void onGifQualitySelect(CCObject* sender);
+    void onGifStyleSelect(CCObject* sender);
 
 public:
     static ModMenuPopup* create();
